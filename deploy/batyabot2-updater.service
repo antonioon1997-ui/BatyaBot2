@@ -1,0 +1,13 @@
+[Unit]
+Description=BatyaBot2 Safe Updater
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Environment=PROJECT_DIR=/root/BatyaBot/BatyaBot2
+Environment=BOT_SERVICE=batyabot2.service
+Environment=KEEP_DEPLOY_BACKUPS=10
+Environment=BOT_START_TIMEOUT=60
+ExecStart=/usr/local/lib/batyabot2-updater/batyabot_updater.py
+TimeoutStartSec=300

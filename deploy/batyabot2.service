@@ -1,0 +1,17 @@
+[Unit]
+Description=BatyaBot2 Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/BatyaBot/BatyaBot2
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/root/BatyaBot/BatyaBot2/venv/bin/python /root/BatyaBot/BatyaBot2/main.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

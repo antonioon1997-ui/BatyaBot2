@@ -1,0 +1,140 @@
+# ============================================================
+# Environment variables and local configuration
+# ============================================================
+
+.env
+.env.*
+*.env
+*.env.*
+
+# Safe examples are allowed
+!.env.example
+!*.env.example
+
+
+# ============================================================
+# Credentials, API keys and private keys
+# ============================================================
+
+*credential*.json
+*credentials*.json
+*service-account*.json
+*service_account*.json
+*serviceaccount*.json
+*client-secret*.json
+*client_secret*.json
+*oauth*.json
+
+secrets/
+.secrets/
+credentials/
+
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.session
+*.session-journal
+
+
+# ============================================================
+# SQLite databases and local working data
+# ============================================================
+
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+
+*.backup
+*.bak
+*.old
+
+
+# ============================================================
+# BatyaBot2 runtime data
+# ============================================================
+
+backups/
+deploy_backups/
+logs/
+runtime/
+updates/
+
+
+# ============================================================
+# Logs, process files and temporary files
+# ============================================================
+
+*.log
+*.pid
+*.tmp
+*.temp
+*.swp
+*.swo
+
+
+# ============================================================
+# Python cache, test and build files
+# ============================================================
+
+__pycache__/
+*.py[cod]
+*$py.class
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+.coverage
+.coverage.*
+htmlcov/
+
+build/
+dist/
+*.egg-info/
+
+
+# ============================================================
+# Virtual environments
+# ============================================================
+
+.venv/
+venv/
+env/
+ENV/
+
+
+# ============================================================
+# IDE and editor settings
+# ============================================================
+
+.idea/
+.vscode/
+*.iml
+
+
+# ============================================================
+# Operating system files
+# ============================================================
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+
+# ============================================================
+# Local archives and update packages
+# ============================================================
+
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
