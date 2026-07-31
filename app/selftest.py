@@ -90,6 +90,15 @@ async def run_selftest() -> None:
     from app.services.feedback import create_feedback, get_feedback, list_feedback
     from app.services.polls import create_poll, get_poll_results, upsert_vote
     from app.services.preferences import get_message_style, set_message_style
+    from app.services.ui_metrics import (
+        classify_callback_button,
+        classify_reply_button,
+        export_ui_metrics_csv,
+        get_button_summary,
+        get_department_totals,
+        get_unused_main_buttons,
+        record_ui_event,
+    )
     from app.services.ui_versions import (
         CURRENT_UI_ID,
         LEGACY_UI_ID,
@@ -141,7 +150,7 @@ async def run_selftest() -> None:
     from app.utils import format_moscow_datetime, html_escape
 
     # Импорт всех роутеров ловит ошибки после рефакторинга импортов до установки.
-    from app.handlers import admin, admin_feedback, admin_productivity, help, start, system, tickets, updater  # noqa: F401
+    from app.handlers import admin, admin_feedback, admin_productivity, admin_ui_metrics, help, start, system, tickets, updater  # noqa: F401
 
     _prepare_legacy_database(database_path)
     await init_db()
@@ -159,7 +168,7 @@ async def run_selftest() -> None:
         for required_table in (
             "ticket_reads", "ticket_transfer_requests", "ticket_assignment_history",
             "day_off_releases", "response_templates", "ticket_metrics", "daily_stats",
-            "feedback_messages", "polls", "poll_votes", "admin_notes",
+            "feedback_messages", "polls", "poll_votes", "admin_notes", "ui_button_events",
         ):
             _assert(required_table in tables, f"Не создана таблица {required_table}")
         template_count = connection.execute(
@@ -214,6 +223,39 @@ async def run_selftest() -> None:
     _assert(await upsert_vote(poll_id, 1001, "0"), "Голос не сохранён")
     poll_result = await get_poll_results(poll_id)
     _assert(poll_result["total"] == 1 and poll_result["counts"].get("0") == 1, "Результат голосования неверен")
+
+    # Метрики кнопок: reply- и inline-варианты объединяются под стабильными ID.
+    reply_info = classify_reply_button("📌 Моя работа")
+    callback_info = classify_callback_button("work_hub", "📌 Моя работа")
+    _assert(reply_info and callback_info and reply_info[0] == callback_info[0] == "main.my_work", "Кнопка «Моя работа» классифицируется по-разному")
+    _assert(
+        await record_ui_event(
+            user_id=1001,
+            button_id=reply_info[0],
+            button_text=reply_info[1],
+            source="reply",
+            scope=reply_info[2],
+        ),
+        "Метрика reply-кнопки не сохранена",
+    )
+    _assert(
+        await record_ui_event(
+            user_id=2001,
+            button_id="main.incoming",
+            button_text="📥 Входящие",
+            source="inline",
+            scope="main",
+        ),
+        "Метрика inline-кнопки не сохранена",
+    )
+    metric_rows = await get_button_summary(days=7, scope="main")
+    _assert(any(row["button_id"] == "main.my_work" for row in metric_rows), "Метрика не попала в общую сводку")
+    department_rows = await get_department_totals(days=7, scope="main")
+    _assert({row["department"] for row in department_rows} >= {"client", "purchasing"}, "Метрики не разделились по отделам")
+    unused = await get_unused_main_buttons(days=7)
+    _assert(any(button_id == "main.archive" for button_id, _ in unused), "Не определяются кнопки без нажатий")
+    metrics_csv = await export_ui_metrics_csv(days=7)
+    _assert(b"button_id" in metrics_csv and b"main.my_work" in metrics_csv, "CSV метрик не сформирован")
 
     # Обычный ответ запускает работу, но назначение исполнителя остаётся добровольным.
     common_ticket = await create_ticket(

@@ -135,12 +135,16 @@ async def help_faq_article_callback(call: CallbackQuery):
     await call.answer()
 
 
-def _notes_for_user(notes: list[str], role: str | None) -> list[str]:
+def _notes_for_user(notes: list[str], role: str | None, *, is_admin_user: bool = False) -> list[str]:
     department = department_by_role(role)
     result: list[str] = []
     for note in notes:
         item = str(note).strip()
         lowered = item.lower()
+        if lowered.startswith("[admin]"):
+            if is_admin_user:
+                result.append(item[len("[admin]"):].strip())
+            continue
         if lowered.startswith("[client]"):
             if department == "client":
                 result.append(item[len("[client]"):].strip())
@@ -176,7 +180,7 @@ async def help_whats_new_callback(call: CallbackQuery):
         await _deny(call)
         return
     version, notes = _latest_update()
-    notes = _notes_for_user(notes, user["role"])
+    notes = _notes_for_user(notes, user["role"], is_admin_user=int(call.from_user.id) == int(settings.admin_id))
     lines = "\n".join(f"• {html_escape(item)}" for item in notes) or "• Пользовательских изменений для вашей роли нет."
     await call.message.answer(
         "🆕 <b>Что нового</b>\n\n"

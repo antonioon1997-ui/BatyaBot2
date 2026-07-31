@@ -40,8 +40,20 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 
+def _clean_admin_note(value: str) -> str:
+    item = str(value).strip()
+    for prefix in ("[client]", "[purchasing]", "[all]", "[admin]"):
+        if item.lower().startswith(prefix):
+            return item[len(prefix):].strip()
+    return item
+
+
 def _inspection_text(inspection) -> str:
-    notes = "\n".join(f"• {html_escape(item)}" for item in inspection.release_notes)
+    notes = "\n".join(
+        f"• {html_escape(_clean_admin_note(item))}"
+        for item in inspection.release_notes
+        if _clean_admin_note(item)
+    )
     lines = [
         "✅ <b>Архив прошёл предварительную проверку</b>",
         "",
@@ -115,7 +127,7 @@ async def admin_update_history_callback(call: CallbackQuery):
             changes = []
             for raw in item.get("changes", []):
                 value = str(raw).strip()
-                for prefix in ("[client]", "[purchasing]", "[all]"):
+                for prefix in ("[client]", "[purchasing]", "[all]", "[admin]"):
                     if value.lower().startswith(prefix):
                         value = value[len(prefix):].strip()
                         break
