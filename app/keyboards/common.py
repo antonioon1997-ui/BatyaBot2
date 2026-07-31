@@ -1,6 +1,7 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
 from app.domain import department_by_role, is_observer_role, normalize_role
+from app.services.ui_versions import help_button_enabled
 
 def row_get(row, key, default=None):
     if row is None:
@@ -42,6 +43,8 @@ def bottom_menu_for_role(role: str | None = None, is_admin: bool = False) -> Rep
                 KeyboardButton(text="📊 Статистика"),
             ],
         ]
+        if help_button_enabled():
+            keyboard.append([KeyboardButton(text="❓ Помощь")])
 
         return ReplyKeyboardMarkup(
             keyboard=keyboard,
@@ -68,6 +71,9 @@ def bottom_menu_for_role(role: str | None = None, is_admin: bool = False) -> Rep
             KeyboardButton(text="📌 Моя работа"),
         ],
     ]
+
+    if help_button_enabled():
+        keyboard.append([KeyboardButton(text="❓ Помощь")])
 
     if is_admin:
         keyboard.append(
@@ -114,28 +120,29 @@ def access_request_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
 
 def main_menu_for_role(role: str | None = None, is_admin: bool = False) -> InlineKeyboardMarkup:
     if is_observer_role(role) and not is_admin:
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🟢 Активные тикеты",
-                        callback_data="observer_active_tickets:0"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="✅ Закрытые тикеты",
-                        callback_data="observer_closed_tickets:0"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="📊 Статистика",
-                        callback_data="observer_stats_menu"
-                    )
-                ],
-            ]
-        )
+        rows = [
+            [
+                InlineKeyboardButton(
+                    text="🟢 Активные тикеты",
+                    callback_data="observer_active_tickets:0"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✅ Закрытые тикеты",
+                    callback_data="observer_closed_tickets:0"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📊 Статистика",
+                    callback_data="observer_stats_menu"
+                )
+            ],
+        ]
+        if help_button_enabled():
+            rows.append([InlineKeyboardButton(text="❓ Помощь", callback_data="help_main")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
 
     keyboard = [
         [
@@ -177,6 +184,16 @@ def main_menu_for_role(role: str | None = None, is_admin: bool = False) -> Inlin
             ),
         ],
     ]
+
+    if help_button_enabled():
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text="❓ Помощь",
+                    callback_data="help_main"
+                )
+            ]
+        )
 
     if is_admin:
         keyboard.append(

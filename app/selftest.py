@@ -87,6 +87,18 @@ async def run_selftest() -> None:
     from app.keyboards.tickets import ticket_action_keyboard
     from app.services.analytics import collect_daily_stats, export_statistics_csv
     from app.services.backups import create_database_backup
+    from app.services.feedback import create_feedback, get_feedback, list_feedback
+    from app.services.polls import create_poll, get_poll_results, upsert_vote
+    from app.services.preferences import get_message_style, set_message_style
+    from app.services.ui_versions import (
+        CURRENT_UI_ID,
+        LEGACY_UI_ID,
+        activate_ui_version,
+        ensure_ui_versions,
+        get_active_ui_id,
+        help_button_enabled,
+        list_ui_versions,
+    )
     from app.services.templates import create_response_template, get_response_templates, update_response_template
     from app.services.order_status import (
         build_order_status_index,
@@ -129,7 +141,7 @@ async def run_selftest() -> None:
     from app.utils import format_moscow_datetime, html_escape
 
     # Импорт всех роутеров ловит ошибки после рефакторинга импортов до установки.
-    from app.handlers import admin, admin_productivity, start, system, tickets, updater  # noqa: F401
+    from app.handlers import admin, admin_feedback, admin_productivity, help, start, system, tickets, updater  # noqa: F401
 
     _prepare_legacy_database(database_path)
     await init_db()
@@ -142,9 +154,12 @@ async def run_selftest() -> None:
         for required_column in ("assigned_at", "assigned_by", "current_summary", "next_action", "snoozed_until"):
             _assert(required_column in columns, f"Миграция {required_column} не выполнена")
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        user_columns = {row[1] for row in connection.execute("PRAGMA table_info(users)")}
+        _assert("message_style" in user_columns, "Миграция message_style не выполнена")
         for required_table in (
             "ticket_reads", "ticket_transfer_requests", "ticket_assignment_history",
             "day_off_releases", "response_templates", "ticket_metrics", "daily_stats",
+            "feedback_messages", "polls", "poll_votes", "admin_notes",
         ):
             _assert(required_table in tables, f"Не создана таблица {required_table}")
         template_count = connection.execute(
@@ -164,6 +179,41 @@ async def run_selftest() -> None:
             and legacy[4] is None,
             "Новые поля старого тикета заполнены неверно",
         )
+
+    # Центр помощи, персональный стиль, обратная связь и голосования.
+    ensure_ui_versions()
+    _assert(get_active_ui_id() == CURRENT_UI_ID, "Новая версия интерфейса не активирована по умолчанию")
+    _assert(help_button_enabled(), "В интерфейсе 2.3 скрыта кнопка помощи")
+    _assert(len(list_ui_versions()) <= 5, "Хранится больше пяти версий интерфейса")
+    activate_ui_version(LEGACY_UI_ID)
+    _assert(not help_button_enabled(), "Классический интерфейс не скрывает центр помощи")
+    activate_ui_version(CURRENT_UI_ID)
+
+    _assert(await set_message_style(1001, "friendly") == "friendly", "Не сохраняется дружелюбный стиль")
+    _assert(await get_message_style(1001) == "friendly", "Дружелюбный стиль не читается")
+    _assert(await set_message_style(1001, "strict") == "strict", "Не возвращается строгий стиль")
+
+    feedback_id = await create_feedback(
+        user_id=1001,
+        username="client_one",
+        full_name="Клиент <Один>",
+        role="client",
+        source="idea",
+        text="Было бы удобно сократить один шаг",
+    )
+    _assert((await get_feedback(feedback_id))["status"] == "new", "Обратная связь создана с неверным статусом")
+    _assert(any(int(row["id"]) == feedback_id for row in await list_feedback(status="new")), "Новое сообщение не попало в список")
+
+    poll_id = await create_poll(
+        poll_type="choice",
+        question="Какой вариант удобнее?",
+        options=["Вариант А", "Вариант Б"],
+        none_label="🚫 Оставить как есть",
+        created_by=1,
+    )
+    _assert(await upsert_vote(poll_id, 1001, "0"), "Голос не сохранён")
+    poll_result = await get_poll_results(poll_id)
+    _assert(poll_result["total"] == 1 and poll_result["counts"].get("0") == 1, "Результат голосования неверен")
 
     # Обычный ответ запускает работу, но назначение исполнителя остаётся добровольным.
     common_ticket = await create_ticket(
@@ -438,6 +488,7 @@ async def run_selftest() -> None:
         if getattr(button, "callback_data", None)
     }
     _assert("🔎 Узнать статус заказа" in reply_menu_texts, "В нижнем меню нет проверки заказа")
+    _assert("❓ Помощь" in reply_menu_texts, "В нижнем меню нет центра помощи")
     _assert("order_status_start" in inline_callbacks, "В inline-меню нет проверки заказа")
     _assert(html_escape("5 < 10 & 12 > 3") == "5 &lt; 10 &amp; 12 &gt; 3", "HTML не экранируется")
     _assert(format_moscow_datetime("2026-01-01 00:00:00").endswith("03:00 МСК"), "Неверное преобразование UTC в МСК")

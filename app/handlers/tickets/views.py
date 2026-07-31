@@ -20,6 +20,7 @@ from app.keyboards.tickets import (
     tickets_list_keyboard,
 )
 from app.services.attachments import get_ticket_attachments
+from app.services.preferences import user_text
 from app.services.work_management import mark_ticket_read
 from app.services.tickets import (
     get_archive_incoming_tickets,
@@ -53,7 +54,9 @@ async def show_main_menu(message_or_call, user=None, admin_flag: bool = False):
         telegram_id = message_or_call.from_user.id
         user, admin_flag = await get_current_user_and_admin(telegram_id)
 
+    telegram_id = int(message_or_call.from_user.id)
     text = "Главное меню."
+    action_prompt = await user_text(telegram_id, "main_menu_title")
 
     if isinstance(message_or_call, CallbackQuery):
         await message_or_call.message.answer(
@@ -65,7 +68,7 @@ async def show_main_menu(message_or_call, user=None, admin_flag: bool = False):
         )
 
         await message_or_call.message.answer(
-            "Выбери действие:",
+            action_prompt,
             reply_markup=main_menu_for_role(
                 role=row_get(user, "role"),
                 is_admin=admin_flag,
@@ -83,7 +86,7 @@ async def show_main_menu(message_or_call, user=None, admin_flag: bool = False):
         )
 
         await message_or_call.answer(
-            "Выбери действие:",
+            action_prompt,
             reply_markup=main_menu_for_role(
                 role=row_get(user, "role"),
                 is_admin=admin_flag,
@@ -296,11 +299,12 @@ async def send_ticket_card(message_or_call, ticket, user=None, admin_flag: bool 
 
 async def send_tickets_list(message_or_call, title: str, tickets):
     if not tickets:
+        empty_text = await user_text(message_or_call.from_user.id, "no_tickets")
         if isinstance(message_or_call, CallbackQuery):
-            await message_or_call.message.answer(f"{title}\n\nТикетов нет.")
+            await message_or_call.message.answer(f"{title}\n\n{empty_text}")
             await message_or_call.answer()
         else:
-            await message_or_call.answer(f"{title}\n\nТикетов нет.")
+            await message_or_call.answer(f"{title}\n\n{empty_text}")
         return
 
     lines = [title, ""]
@@ -410,7 +414,8 @@ async def send_archive_page(message_or_call, archive_type: str, page: int = 0):
         return
 
     if not tickets:
-        text = f"{title}\n\nТикетов нет."
+        empty_text = await user_text(message_or_call.from_user.id, "no_archive_tickets")
+        text = f"{title}\n\n{empty_text}"
 
         if isinstance(message_or_call, CallbackQuery):
             await message_or_call.message.answer(text, reply_markup=archive_menu_keyboard())
@@ -594,7 +599,8 @@ async def send_observer_tickets_page(message_or_call, list_type: str, page: int 
         return
 
     if not tickets:
-        text = f"{title}\n\nТикетов нет."
+        empty_text = await user_text(message_or_call.from_user.id, "no_tickets")
+        text = f"{title}\n\n{empty_text}"
 
         if isinstance(message_or_call, CallbackQuery):
             await message_or_call.message.answer(text, reply_markup=main_menu_for_role(row_get(user, "role")))

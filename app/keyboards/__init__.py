@@ -57,3 +57,24 @@ from .tickets import (
 )
 
 __all__ = [name for name in globals() if not name.startswith("_")]
+
+from .help import (
+    faq_article_keyboard,
+    faq_group_keyboard,
+    faq_main_keyboard,
+    help_input_cancel_keyboard,
+    help_main_keyboard,
+    help_settings_keyboard,
+    message_style_keyboard,
+)
+from .feedback import (
+    admin_feedback_card_keyboard,
+    admin_feedback_list_keyboard,
+    admin_feedback_menu_keyboard,
+    admin_poll_card_keyboard,
+    admin_polls_keyboard,
+    poll_none_label_keyboard,
+    poll_preview_keyboard,
+    poll_type_keyboard,
+    user_poll_keyboard,
+)

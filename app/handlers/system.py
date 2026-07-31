@@ -8,6 +8,7 @@ from app.config import settings
 from app.database import get_db
 from app.scheduler import scheduler
 from app.services.backups import create_database_backup
+from app.services.preferences import user_text
 from app.services.update_manager import JOB_FILE
 from app.services.tickets import get_admin_ticket_stats
 from app.services.users import is_admin
@@ -92,7 +93,7 @@ async def global_error_handler(event: ErrorEvent, bot: Bot):
     try:
         if update.message and update.message.from_user:
             user_id = update.message.from_user.id
-            await update.message.answer("⚠️ Произошла внутренняя ошибка. Администратор уже получит сведения о ней.")
+            await update.message.answer("⚠️ " + (await user_text(user_id, "generic_error")))
         elif update.callback_query and update.callback_query.from_user:
             user_id = update.callback_query.from_user.id
             await update.callback_query.answer("Произошла внутренняя ошибка.", show_alert=True)

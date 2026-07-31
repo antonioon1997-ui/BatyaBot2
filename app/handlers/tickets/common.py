@@ -2,6 +2,8 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
+from app.services.preferences import user_text
+
 from .utils import get_current_user_and_admin
 from .views import show_main_menu
 
@@ -27,4 +29,4 @@ async def callback_main_menu(call: CallbackQuery):
 
 @router.message()
 async def unknown_message(message: Message):
-    await message.answer("Я не понял команду. Используй кнопки меню.")
+    await message.answer(await user_text(message.from_user.id, "unknown_command"))
