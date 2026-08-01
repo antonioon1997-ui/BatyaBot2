@@ -61,8 +61,14 @@ def admin_menu() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="📦 Обновление бота",
-                    callback_data="admin_bot_update"
+                    text="💬 Обратная связь",
+                    callback_data="admin_feedback"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔄 Обновления",
+                    callback_data="admin_updates_menu"
                 )
             ],
             [
@@ -619,3 +625,55 @@ def admin_note_card_keyboard(note_id: int, status: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"admin_note_delete:{note_id}")],
         [InlineKeyboardButton(text="⬅️ К заметкам", callback_data="admin_notes")],
     ])
+
+
+def admin_updates_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📦 Установить обновление", callback_data="admin_bot_update")],
+            [InlineKeyboardButton(text="📋 История обновлений", callback_data="admin_update_history")],
+            [InlineKeyboardButton(text="🎨 Версии интерфейса", callback_data="admin_ui_versions")],
+            [InlineKeyboardButton(text="⬅️ Админка", callback_data="admin_menu")],
+        ]
+    )
+
+
+def admin_ui_versions_keyboard(versions, active_id: str) -> InlineKeyboardMarkup:
+    rows = []
+    for item in versions:
+        prefix = "✅ " if item.get("id") == active_id else ""
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{prefix}{item.get('title', item.get('id', 'Версия'))}",
+                callback_data=f"admin_ui_version:{item.get('id')}",
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="⬅️ Обновления", callback_data="admin_updates_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_ui_version_card_keyboard(version_id: str, is_active: bool) -> InlineKeyboardMarkup:
+    rows = []
+    if not is_active:
+        rows.append([
+            InlineKeyboardButton(
+                text="↩️ Применить эту версию интерфейса",
+                callback_data=f"admin_ui_activate:{version_id}",
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="⬅️ К версиям", callback_data="admin_ui_versions")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_ui_activate_confirm_keyboard(version_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Применить только интерфейс",
+                    callback_data=f"admin_ui_confirm:{version_id}",
+                )
+            ],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"admin_ui_version:{version_id}")],
+        ]
+    )

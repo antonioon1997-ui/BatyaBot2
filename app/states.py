@@ -51,3 +51,15 @@ class AdminProductivityStates(StatesGroup):
     waiting_template_body = State()
     waiting_template_edit_title = State()
     waiting_template_edit_body = State()
+
+
+class HelpStates(StatesGroup):
+    waiting_feedback = State()
+    waiting_question = State()
+
+
+class AdminPollStates(StatesGroup):
+    waiting_question = State()
+    waiting_options = State()
+    waiting_none_custom = State()
+    waiting_publish = State()

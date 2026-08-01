@@ -149,6 +149,7 @@ async def init_db():
     await add_column_if_not_exists(db, "users", "day_off_end", "TEXT")
     await add_column_if_not_exists(db, "users", "day_off_set_by", "INTEGER")
     await add_column_if_not_exists(db, "users", "day_off_updated_at", "TEXT")
+    await add_column_if_not_exists(db, "users", "message_style", "TEXT NOT NULL DEFAULT 'strict'")
 
     await db.execute("""
         CREATE TABLE IF NOT EXISTS ticket_events (
@@ -239,6 +240,52 @@ async def init_db():
         )
     """)
 
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS feedback_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            full_name TEXT,
+            role TEXT,
+            source TEXT NOT NULL,
+            text TEXT,
+            file_id TEXT,
+            file_type TEXT,
+            file_name TEXT,
+            status TEXT NOT NULL DEFAULT 'new',
+            admin_note TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT
+        )
+    """)
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS polls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            poll_type TEXT NOT NULL,
+            question TEXT NOT NULL,
+            options_json TEXT NOT NULL,
+            none_label TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_by INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            closed_at TEXT
+        )
+    """)
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS poll_votes (
+            poll_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            choice_key TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT,
+            PRIMARY KEY (poll_id, user_id),
+            FOREIGN KEY(poll_id) REFERENCES polls(id) ON DELETE CASCADE
+        )
+    """)
+
     await db.execute("""
         CREATE TABLE IF NOT EXISTS ticket_metrics (
             ticket_id INTEGER PRIMARY KEY,
@@ -324,6 +371,9 @@ async def init_db():
     await db.execute("CREATE INDEX IF NOT EXISTS idx_assignment_history_ticket ON ticket_assignment_history(ticket_id, created_at)")
     await db.execute("CREATE INDEX IF NOT EXISTS idx_day_off_releases_user_restored ON day_off_releases(user_id, restored)")
     await db.execute("CREATE INDEX IF NOT EXISTS idx_templates_department_active ON response_templates(department, is_active)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_feedback_status_created ON feedback_messages(status, created_at)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_polls_status_created ON polls(status, created_at)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_poll_votes_poll_choice ON poll_votes(poll_id, choice_key)")
 
     await db.execute("""
         INSERT OR IGNORE INTO settings (key, value)
