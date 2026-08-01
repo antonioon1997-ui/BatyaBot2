@@ -29,6 +29,7 @@ from app.keyboards.admin import (
 )
 from app.keyboards.common import main_menu_for_role
 from app.services.admin_notes import list_notes, get_note, create_note, update_note, delete_note
+from app.services.ui_messages import delete_trigger_message, send_ui_text
 from app.services.users import (
     get_user_by_telegram_id,
     get_access_requests,
@@ -370,9 +371,11 @@ async def send_admin_menu(message: Message):
     if await deny_if_not_admin(message):
         return
 
-    await message.answer(
-        "⚙️ <b>Админка</b>\n\nВыбери раздел:",
-        reply_markup=admin_menu()
+    await send_ui_text(
+        message.bot,
+        chat_id=message.from_user.id,
+        text="⚙️ <b>Админка</b>\n\nВыбери раздел:",
+        reply_markup=admin_menu(),
     )
 
 
@@ -438,6 +441,7 @@ async def cmd_reminder_time(message: Message, state: FSMContext):
 @router.message(F.text == "⚙️ Админка")
 async def bottom_admin_menu(message: Message):
     await send_admin_menu(message)
+    await delete_trigger_message(message)
 
 
 @router.callback_query(F.data == "admin_menu")
@@ -445,9 +449,11 @@ async def callback_admin_menu(callback: CallbackQuery):
     if await deny_if_not_admin(callback):
         return
 
-    await callback.message.answer(
-        "⚙️ <b>Админка</b>\n\nВыбери раздел:",
-        reply_markup=admin_menu()
+    await send_ui_text(
+        callback.bot,
+        chat_id=callback.from_user.id,
+        text="⚙️ <b>Админка</b>\n\nВыбери раздел:",
+        reply_markup=admin_menu(),
     )
 
     await callback.answer()

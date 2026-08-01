@@ -4,8 +4,7 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from app.domain import DEPARTMENT_PURCHASING, OPEN_STATUSES
-from app.keyboards.productivity import response_templates_keyboard, template_preview_keyboard
+from app.domain import OPEN_STATUSES
 from app.keyboards.tickets import delayed_close_keyboard, ticket_action_keyboard
 from app.services.tickets import (
     AUTO_CLOSE_MINUTES,
@@ -16,8 +15,7 @@ from app.services.tickets import (
     take_ticket,
     update_ticket_status,
 )
-from app.services.templates import get_response_template, get_response_templates
-from app.states import ProductivityStates, TicketActionStates
+from app.states import TicketActionStates
 from app.utils import html_escape
 
 from .utils import (
@@ -115,25 +113,6 @@ async def _start_comment_entry(call: CallbackQuery, state: FSMContext, ticket, u
     ticket_id = int(ticket["id"])
     await state.clear()
     await state.update_data(ticket_id=ticket_id, close_after_comment=close_after_comment)
-    user_department = department_by_role(row_get(user, "role"))
-    use_templates = (
-        user_department == DEPARTMENT_PURCHASING
-        and row_get(ticket, "executor_department") == DEPARTMENT_PURCHASING
-    )
-    if use_templates:
-        templates = await get_response_templates(DEPARTMENT_PURCHASING)
-        if templates:
-            await state.set_state(TicketActionStates.waiting_comment)
-            prompt = (
-                f"Выбери шаблон ответа к тикету #{ticket_id} или напиши ответ вручную."
-                + (" После отправки тикет будет выполнен." if close_after_comment else "")
-            )
-            await call.message.answer(
-                prompt,
-                reply_markup=response_templates_keyboard(ticket_id, close_after_comment, templates),
-            )
-            await call.answer()
-            return
     await state.set_state(TicketActionStates.waiting_comment)
     await call.message.answer(
         f"Напиши {'ответ' if close_after_comment else 'комментарий'} к тикету #{ticket_id} одним сообщением."
@@ -259,73 +238,12 @@ async def process_ticket_comment(message: Message, state: FSMContext):
     await _submit_comment_text(message, state, message.text)
 
 
-@router.callback_query(F.data.startswith("ticket_tpl_manual:"))
-async def callback_template_manual(call: CallbackQuery, state: FSMContext):
-    _, ticket_raw, close_raw = call.data.split(":")
-    data = await state.get_data()
-    if int(data.get("ticket_id", 0)) != int(ticket_raw):
-        await call.answer("Сценарий устарел. Открой тикет заново.", show_alert=True)
-        return
-    await state.set_state(TicketActionStates.waiting_comment)
-    await state.update_data(close_after_comment=bool(int(close_raw)))
-    await call.message.answer("Напиши текст одним сообщением.")
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("ticket_tpl:"))
-async def callback_template_select(call: CallbackQuery, state: FSMContext):
-    _, ticket_raw, template_raw, close_raw = call.data.split(":")
-    data = await state.get_data()
-    if int(data.get("ticket_id", 0)) != int(ticket_raw):
-        await call.answer("Сценарий устарел. Открой тикет заново.", show_alert=True)
-        return
-    template = await get_response_template(int(template_raw))
-    if not template or not template["is_active"] or template["department"] != DEPARTMENT_PURCHASING:
-        await call.answer("Шаблон недоступен.", show_alert=True)
-        return
-    await state.set_state(ProductivityStates.waiting_template_confirm)
-    await state.update_data(template_text=template["body"], close_after_comment=bool(int(close_raw)))
-    await call.message.answer(
-        f"Предпросмотр ответа:\n\n{html_escape(template['body'])}",
-        reply_markup=template_preview_keyboard(),
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data == "ticket_tpl_send")
-async def callback_template_send(call: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    text = data.get("template_text")
-    if not text:
-        await call.answer("Шаблон уже неактуален.", show_alert=True)
-        return
-    await _submit_comment_text(call, state, str(text))
-
-
-@router.callback_query(F.data == "ticket_tpl_edit")
-async def callback_template_edit(call: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    if not data.get("template_text"):
-        await call.answer("Шаблон уже неактуален.", show_alert=True)
-        return
-    await state.set_state(ProductivityStates.waiting_template_edit)
-    await call.message.answer("Отправь изменённый текст одним сообщением.")
-    await call.answer()
-
-
-@router.message(ProductivityStates.waiting_template_edit)
-async def process_template_edit(message: Message, state: FSMContext):
-    if not message.text or not message.text.strip():
-        await message.answer("Ответ должен быть текстом.")
-        return
-    await _submit_comment_text(message, state, message.text)
-
-
-@router.callback_query(F.data == "ticket_tpl_cancel")
-async def callback_template_cancel(call: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data.startswith("ticket_tpl"))
+async def disabled_template_callback(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.message.answer("Ответ отменён.")
-    await call.answer()
+    await call.answer("Шаблоны ответов отключены.", show_alert=True)
+    await call.message.answer("Шаблоны ответов больше не используются. Открой тикет и нажми «Ответить», затем напиши текст своими словами.")
+
 
 @router.callback_query(F.data.startswith("ticket_resolve:"))
 async def ticket_resolve_callback(call: CallbackQuery):
@@ -573,7 +491,7 @@ async def ticket_cancel_callback(call: CallbackQuery, state: FSMContext):
     ticket = await get_ticket_by_id(ticket_id)
 
     if not can_participant_cancel_ticket(ticket, user, admin_flag):
-        await call.answer("Закрыть тикет может участник одного из отделов или администратор.", show_alert=True)
+        await call.answer("Закрыть тикет как неактуальный может его автор или администратор.", show_alert=True)
         return
 
     await state.clear()
@@ -600,7 +518,7 @@ async def process_cancel_reason(message: Message, state: FSMContext):
 
     if not can_participant_cancel_ticket(ticket, user, admin_flag):
         await state.clear()
-        await message.answer("Ты не можешь закрыть этот тикет.")
+        await message.answer("Закрыть этот тикет как неактуальный может только его автор или администратор.")
         return
 
     reason_text = message.text.strip()

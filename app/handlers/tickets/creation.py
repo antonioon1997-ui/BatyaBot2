@@ -1,3 +1,4 @@
+import logging
 import re
 
 from aiogram import F, Router
@@ -13,6 +14,8 @@ from app.keyboards.tickets import (
     ticket_category_keyboard,
 )
 from app.services.attachments import create_attachment
+from app.services.ticket_messages import replace_ticket_message_bundle
+from app.services.ui_messages import clear_ui_message_bundle, delete_trigger_message, send_ui_text
 from app.services.tickets import (
     create_ticket,
     get_ticket_by_id,
@@ -35,6 +38,7 @@ from .utils import (
 )
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 async def start_create_ticket(message_or_call, state: FSMContext):
@@ -73,11 +77,14 @@ async def start_create_ticket(message_or_call, state: FSMContext):
         "<b>По возможности пишите его в формате \"Заказ N\".</b>"
     )
 
+    await send_ui_text(
+        message_or_call.bot,
+        chat_id=telegram_id,
+        text=text,
+        reply_markup=cancel_create_keyboard(),
+    )
     if isinstance(message_or_call, CallbackQuery):
-        await message_or_call.message.answer(text, reply_markup=cancel_create_keyboard())
         await message_or_call.answer()
-    else:
-        await message_or_call.answer(text, reply_markup=cancel_create_keyboard())
 
 def parse_ticket_text(text: str):
     description = text.strip()
@@ -139,11 +146,28 @@ async def _persist_pending_ticket(target, state: FSMContext, pending: dict):
 
     await state.clear()
     message = target.message if isinstance(target, CallbackQuery) else target
-    await message.answer(
+    confirmation = await message.answer(
         f"✅ Тикет #{ticket_id} создан и отправлен в: {get_department_name(pending['executor_department'])}\n\n"
         "Дополнительные параметры необязательны. Можно ничего не выбирать.",
         reply_markup=post_create_options_keyboard(ticket_id),
     )
+    try:
+        await clear_ui_message_bundle(
+            target.bot,
+            chat_id=int(pending["created_by"]),
+        )
+    except Exception:
+        logger.exception("Не удалось убрать экран создания тикета у пользователя %s", pending["created_by"])
+    try:
+        await replace_ticket_message_bundle(
+            target.bot,
+            chat_id=int(pending["created_by"]),
+            ticket_id=ticket_id,
+            new_message_ids=[int(confirmation.message_id)],
+        )
+    except Exception:
+        # Подтверждение уже доставлено. Ошибка реестра не должна отменять создание тикета.
+        logger.exception("Не удалось зарегистрировать карточку созданного тикета %s", ticket_id)
 
     order_line = optional_line("🔢 Заказ: ", pending.get("order_number"))
     attachments_line = "📎 Есть вложения: 1 шт.\n" if attachment else ""
@@ -188,7 +212,12 @@ async def create_ticket_from_message(message: Message, state: FSMContext):
 
     text = message.text or message.caption
     if not text or not text.strip():
-        await message.answer("Пришли текст тикета. Если отправляешь вложение, добавь к нему подпись.")
+        await send_ui_text(
+            message.bot,
+            chat_id=message.from_user.id,
+            text="Пришли текст тикета. Если отправляешь вложение, добавь к нему подпись.",
+            reply_markup=cancel_create_keyboard(),
+        )
         return
 
     title, description, order_number = parse_ticket_text(text)
@@ -214,7 +243,12 @@ async def create_ticket_from_message(message: Message, state: FSMContext):
         for ticket in duplicates[:5]:
             lines.append(f"#{ticket['id']} — {html_escape(str(ticket['description'])[:180])}")
         lines.append("\nПроверь существующий тикет или создай новый, если вопрос другой.")
-        await message.answer("\n".join(lines), reply_markup=duplicate_warning_keyboard(duplicates))
+        await send_ui_text(
+            message.bot,
+            chat_id=message.from_user.id,
+            text="\n".join(lines),
+            reply_markup=duplicate_warning_keyboard(duplicates),
+        )
         return
 
     await _persist_pending_ticket(message, state, pending)
@@ -236,6 +270,7 @@ async def callback_duplicate_create_confirm(call: CallbackQuery, state: FSMConte
 @router.message(F.text == "➕ Создать тикет")
 async def bottom_create_ticket(message: Message, state: FSMContext):
     await start_create_ticket(message, state)
+    await delete_trigger_message(message)
 
 @router.callback_query(F.data == "create_ticket")
 async def callback_create_ticket(call: CallbackQuery, state: FSMContext):
@@ -260,8 +295,8 @@ async def add_attachments_before_create(call: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "cancel_create_ticket")
 async def cancel_create_ticket_callback(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.message.answer("Создание тикета отменено.")
-    await call.answer()
+    await clear_ui_message_bundle(call.bot, chat_id=call.from_user.id)
+    await call.answer("Создание тикета отменено.")
 
 @router.callback_query(F.data == "noop")
 async def noop_callback(call: CallbackQuery):

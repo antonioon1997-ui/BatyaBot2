@@ -316,6 +316,27 @@ async def init_db():
     """)
 
     await db.execute("""
+        CREATE TABLE IF NOT EXISTS ticket_message_registry (
+            ticket_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            message_ids_json TEXT NOT NULL DEFAULT '[]',
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (ticket_id, user_id),
+            FOREIGN KEY(ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+        )
+    """)
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS ui_message_registry (
+            user_id INTEGER NOT NULL,
+            slot TEXT NOT NULL,
+            message_ids_json TEXT NOT NULL DEFAULT '[]',
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, slot)
+        )
+    """)
+
+    await db.execute("""
         CREATE TABLE IF NOT EXISTS daily_stats (
             stat_date TEXT PRIMARY KEY,
             total_open INTEGER NOT NULL DEFAULT 0,
@@ -394,6 +415,8 @@ async def init_db():
     await db.execute("CREATE INDEX IF NOT EXISTS idx_ui_button_events_button_created ON ui_button_events(button_id, created_at)")
     await db.execute("CREATE INDEX IF NOT EXISTS idx_ui_button_events_user_created ON ui_button_events(user_id, created_at)")
     await db.execute("CREATE INDEX IF NOT EXISTS idx_ui_button_events_department_created ON ui_button_events(department, created_at)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_ticket_message_registry_user ON ticket_message_registry(user_id, updated_at)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_ui_message_registry_updated ON ui_message_registry(updated_at)")
 
     await db.execute("""
         INSERT OR IGNORE INTO settings (key, value)

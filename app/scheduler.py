@@ -16,6 +16,7 @@ from app.keyboards.productivity import daily_summary_confirm_keyboard, restore_d
 from app.keyboards.tickets import open_ticket_keyboard, overdue_tickets_keyboard
 from app.services.analytics import build_daily_summary_text, collect_daily_stats, mark_daily_summary_admin_sent, save_daily_summary
 from app.services.backups import create_database_backup
+from app.services.ticket_messages import send_live_ticket_text
 from app.services.work_management import (
     activate_scheduled_day_offs,
     expire_finished_day_offs,
@@ -172,9 +173,11 @@ async def process_due_ticket_auto_closures(bot):
 
             if creator_id:
                 try:
-                    await bot.send_message(
-                        creator_id,
-                        f"✅ Тикет #{ticket_id} автоматически закрыт как выполненный.",
+                    await send_live_ticket_text(
+                        bot,
+                        chat_id=creator_id,
+                        ticket_id=ticket_id,
+                        text=f"✅ Тикет #{ticket_id} автоматически закрыт как выполненный.",
                         reply_markup=open_ticket_keyboard(ticket_id),
                     )
                 except Exception:
@@ -189,9 +192,11 @@ async def process_due_ticket_auto_closures(bot):
             for user in users:
                 telegram_id = int(user["telegram_id"])
                 try:
-                    await bot.send_message(
-                        telegram_id,
-                        f"✅ Тикет #{ticket_id} автоматически закрыт как выполненный.",
+                    await send_live_ticket_text(
+                        bot,
+                        chat_id=telegram_id,
+                        ticket_id=ticket_id,
+                        text=f"✅ Тикет #{ticket_id} автоматически закрыт как выполненный.",
                         reply_markup=open_ticket_keyboard(ticket_id),
                     )
                 except Exception:
@@ -220,9 +225,11 @@ async def process_snoozed_tickets(bot):
                 recipients = await get_active_users_by_department(row_get(ticket, "executor_department"))
             for user in recipients:
                 try:
-                    await bot.send_message(
-                        int(user["telegram_id"]),
-                        f"⏰ Срок отложения тикета #{ticket_id} завершён. Он снова доступен в рабочих списках.",
+                    await send_live_ticket_text(
+                        bot,
+                        chat_id=int(user["telegram_id"]),
+                        ticket_id=ticket_id,
+                        text=f"⏰ Срок отложения тикета #{ticket_id} завершён. Он снова доступен в рабочих списках.",
                         reply_markup=open_ticket_keyboard(ticket_id),
                     )
                 except Exception:

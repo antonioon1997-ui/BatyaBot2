@@ -49,12 +49,6 @@ def admin_menu() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="💬 Шаблоны закупки",
-                    callback_data="admin_templates"
-                )
-            ],
-            [
-                InlineKeyboardButton(
                     text="📝 Заметки об обновлениях",
                     callback_data="admin_notes"
                 )
@@ -631,6 +625,7 @@ def admin_updates_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📦 Установить обновление", callback_data="admin_bot_update")],
+            [InlineKeyboardButton(text="📤 Выгрузить текущую версию", callback_data="admin_export_project")],
             [InlineKeyboardButton(text="📋 История обновлений", callback_data="admin_update_history")],
             [InlineKeyboardButton(text="🎨 Версии интерфейса", callback_data="admin_ui_versions")],
             [InlineKeyboardButton(text="⬅️ Админка", callback_data="admin_menu")],

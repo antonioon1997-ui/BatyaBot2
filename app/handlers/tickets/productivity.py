@@ -9,6 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app.domain import DEPARTMENT_PURCHASING, OPEN_STATUSES, department_by_role, normalize_department
+from app.keyboards.tickets import ticket_notification_keyboard
 from app.keyboards.productivity import (
     assignment_candidates_keyboard,
     day_off_keyboard,
@@ -18,6 +19,7 @@ from app.keyboards.productivity import (
     transfer_request_keyboard,
     work_hub_keyboard,
 )
+from app.services.ticket_messages import send_live_ticket_text
 from app.services.tickets import get_ticket_by_id, get_active_users_by_department
 from app.services.users import get_user_by_telegram_id
 from app.services.work_management import (
@@ -300,7 +302,15 @@ async def callback_transfer_to(call: CallbackQuery):
         return
     if target:
         try:
-            await call.bot.send_message(target, f"👤 Тебе передан тикет #{ticket_id}.")
+            updated_ticket = await get_ticket_by_id(ticket_id)
+            target_user = await get_user_by_telegram_id(target)
+            await send_live_ticket_text(
+                call.bot,
+                chat_id=target,
+                ticket_id=ticket_id,
+                text=f"👤 Тебе передан тикет #{ticket_id}.",
+                reply_markup=ticket_notification_keyboard(updated_ticket, target_user),
+            )
         except Exception:
             logger.exception("Не удалось уведомить нового исполнителя %s", target)
     await call.message.answer(f"✅ Исполнитель тикета #{ticket_id} изменён.")
@@ -321,9 +331,11 @@ async def callback_transfer_request(call: CallbackQuery):
         return
     assignee_id = int(row_get(ticket, "taken_by"))
     try:
-        await call.bot.send_message(
-            assignee_id,
-            f"🙋 Сотрудник {html_escape(row_get(user, 'full_name') or row_get(user, 'username') or call.from_user.id)} просит передать ему тикет #{ticket_id}.",
+        await send_live_ticket_text(
+            call.bot,
+            chat_id=assignee_id,
+            ticket_id=ticket_id,
+            text=f"🙋 Сотрудник {html_escape(row_get(user, 'full_name') or row_get(user, 'username') or call.from_user.id)} просит передать ему тикет #{ticket_id}.",
             reply_markup=transfer_request_keyboard(request_id, ticket_id),
         )
     except Exception:
@@ -343,9 +355,14 @@ async def callback_process_transfer_request(call: CallbackQuery):
         return
     if requester_id:
         try:
-            await call.bot.send_message(
-                requester_id,
-                (f"✅ Тикет #{ticket_id} передан тебе." if approve else f"❌ Запрос на тикет #{ticket_id} отклонён."),
+            updated_ticket = await get_ticket_by_id(ticket_id)
+            requester_user = await get_user_by_telegram_id(requester_id)
+            await send_live_ticket_text(
+                call.bot,
+                chat_id=requester_id,
+                ticket_id=ticket_id,
+                text=(f"✅ Тикет #{ticket_id} передан тебе." if approve else f"❌ Запрос на тикет #{ticket_id} отклонён."),
+                reply_markup=ticket_notification_keyboard(updated_ticket, requester_user),
             )
         except Exception:
             logger.exception("Не удалось уведомить инициатора запроса %s", requester_id)
@@ -387,7 +404,15 @@ async def callback_admin_assign_to(call: CallbackQuery):
         return
     if target:
         try:
-            await call.bot.send_message(target, f"👤 Администратор назначил тебе тикет #{ticket_id}.")
+            updated_ticket = await get_ticket_by_id(ticket_id)
+            target_user = await get_user_by_telegram_id(target)
+            await send_live_ticket_text(
+                call.bot,
+                chat_id=target,
+                ticket_id=ticket_id,
+                text=f"👤 Администратор назначил тебе тикет #{ticket_id}.",
+                reply_markup=ticket_notification_keyboard(updated_ticket, target_user),
+            )
         except Exception:
             logger.exception("Не удалось уведомить назначенного пользователя %s", target)
     await call.message.answer(f"✅ Назначение тикета #{ticket_id} обновлено.")

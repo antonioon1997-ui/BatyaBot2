@@ -23,6 +23,7 @@ from app.services.order_status import (
     extract_order_number_from_query,
     get_order_status,
 )
+from app.services.ui_messages import UiMessagePart, clear_ui_message_bundle, delete_trigger_message, send_ui_parts, send_ui_text
 from app.services.tickets import (
     add_ticket_event,
     create_ticket,
@@ -33,7 +34,6 @@ from app.states import OrderStatusStates
 from app.utils import html_escape
 
 from .utils import (
-    answer_long,
     get_current_user_and_admin,
     notify_department_about_ticket,
     row_get,
@@ -125,14 +125,19 @@ async def _send_main_menu(target, state: FSMContext) -> None:
             await target.answer("Нет доступа.")
         return
 
-    message = target.message if isinstance(target, CallbackQuery) else target
-    await message.answer(
-        "Главное меню.",
-        reply_markup=bottom_menu_for_role(row_get(user, "role"), is_admin=admin_flag),
-    )
-    await message.answer(
-        "Выбери действие:",
-        reply_markup=main_menu_for_role(row_get(user, "role"), is_admin=admin_flag),
+    await send_ui_parts(
+        target.bot,
+        chat_id=target.from_user.id,
+        parts=[
+            UiMessagePart(
+                "Главное меню.",
+                bottom_menu_for_role(row_get(user, "role"), is_admin=admin_flag),
+            ),
+            UiMessagePart(
+                "Выбери действие:",
+                main_menu_for_role(row_get(user, "role"), is_admin=admin_flag),
+            ),
+        ],
     )
     if isinstance(target, CallbackQuery):
         await target.answer()
@@ -150,11 +155,14 @@ async def _start_lookup(target, state: FSMContext) -> None:
 
     await state.clear()
     await state.set_state(OrderStatusStates.waiting_order_number)
-    message = target.message if isinstance(target, CallbackQuery) else target
-    await message.answer(
-        "🔎 <b>Узнать статус заказа</b>\n\n"
-        "Введи номер заказа МойСклад.\n\n"
-        "Можно отправить, например: <code>11786</code>, <code>Заказ 11786</code> или <code>№11786</code>.",
+    await send_ui_text(
+        target.bot,
+        chat_id=target.from_user.id,
+        text=(
+            "🔎 <b>Узнать статус заказа</b>\n\n"
+            "Введи номер заказа МойСклад.\n\n"
+            "Можно отправить, например: <code>11786</code>, <code>Заказ 11786</code> или <code>№11786</code>."
+        ),
         reply_markup=order_status_cancel_keyboard(),
     )
     if isinstance(target, CallbackQuery):
@@ -173,9 +181,13 @@ async def _lookup_and_send(message: Message, state: FSMContext, order_number: st
     except OrderStatusUnavailable as exc:
         logger.warning("Статусы заказов временно недоступны: %s", exc)
         await state.clear()
-        await message.answer(
-            "⚠️ Не удалось получить данные из Google Таблицы.\n\n"
-            "Работа тикетов не нарушена. Повтори запрос через несколько секунд.",
+        await send_ui_text(
+            message.bot,
+            chat_id=message.from_user.id,
+            text=(
+                "⚠️ Не удалось получить данные из Google Таблицы.\n\n"
+                "Работа тикетов не нарушена. Повтори запрос через несколько секунд."
+            ),
             reply_markup=order_status_unavailable_keyboard(),
         )
         return
@@ -201,9 +213,10 @@ async def _lookup_and_send(message: Message, state: FSMContext, order_number: st
             stale=lookup.stale,
         )
 
-    await answer_long(
-        message,
-        text,
+    await send_ui_text(
+        message.bot,
+        chat_id=message.from_user.id,
+        text=text,
         reply_markup=order_status_result_keyboard(
             order_number,
             allow_question=allow_question,
@@ -214,6 +227,7 @@ async def _lookup_and_send(message: Message, state: FSMContext, order_number: st
 @router.message(F.text == "🔎 Узнать статус заказа")
 async def bottom_order_status(message: Message, state: FSMContext):
     await _start_lookup(message, state)
+    await delete_trigger_message(message)
 
 
 @router.callback_query(F.data == "order_status_start")
@@ -230,8 +244,10 @@ async def callback_order_status_cancel(call: CallbackQuery, state: FSMContext):
 async def process_order_number(message: Message, state: FSMContext):
     order_number = extract_order_number_from_query(message.text or message.caption)
     if not order_number:
-        await message.answer(
-            "Не удалось распознать номер заказа. Отправь только номер, например <code>11786</code>.",
+        await send_ui_text(
+            message.bot,
+            chat_id=message.from_user.id,
+            text="Не удалось распознать номер заказа. Отправь только номер, например <code>11786</code>.",
             reply_markup=order_status_cancel_keyboard(),
         )
         return
@@ -275,9 +291,13 @@ async def callback_order_status_ask(call: CallbackQuery, state: FSMContext):
         order_status_order_number=order_number,
         order_status_snapshot=snapshot,
     )
-    await call.message.answer(
-        f"❓ <b>Вопрос по заказу {html_escape(order_number)}</b>\n\n"
-        "Напиши вопрос одним сообщением. Можно отправить фото, документ или видео с подписью.",
+    await send_ui_text(
+        call.bot,
+        chat_id=call.from_user.id,
+        text=(
+            f"❓ <b>Вопрос по заказу {html_escape(order_number)}</b>\n\n"
+            "Напиши вопрос одним сообщением. Можно отправить фото, документ или видео с подписью."
+        ),
         reply_markup=order_status_cancel_keyboard(),
     )
     await call.answer()
@@ -293,8 +313,10 @@ async def process_order_question(message: Message, state: FSMContext):
 
     question = (message.text or message.caption or "").strip()
     if not question:
-        await message.answer(
-            "Добавь текст вопроса. Если отправляешь вложение, напиши вопрос в подписи.",
+        await send_ui_text(
+            message.bot,
+            chat_id=message.from_user.id,
+            text="Добавь текст вопроса. Если отправляешь вложение, напиши вопрос в подписи.",
             reply_markup=order_status_cancel_keyboard(),
         )
         return
@@ -341,13 +363,16 @@ async def process_order_question(message: Message, state: FSMContext):
         )
     except Exception:
         logger.exception("Не удалось создать вопрос по заказу %s", order_number)
-        await message.answer(
-            "Не удалось создать тикет из-за внутренней ошибки. Данные не потеряны — попробуй отправить вопрос ещё раз.",
+        await send_ui_text(
+            message.bot,
+            chat_id=message.from_user.id,
+            text="Не удалось создать тикет из-за внутренней ошибки. Данные не потеряны — попробуй отправить вопрос ещё раз.",
             reply_markup=order_status_cancel_keyboard(),
         )
         return
 
     await state.clear()
+    await clear_ui_message_bundle(message.bot, chat_id=message.from_user.id)
     ticket = await get_ticket_by_id(ticket_id)
     await message.answer(
         f"✅ Тикет #{ticket_id} по заказу {html_escape(order_number)} создан и отправлен в отдел закупки.\n\n"

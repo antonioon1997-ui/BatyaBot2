@@ -7,7 +7,7 @@ from pathlib import Path
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from app.config import settings
 from app.keyboards.common import bottom_menu_for_role
@@ -26,6 +26,7 @@ from app.services.update_manager import (
     start_external_updater,
     write_pending_job,
 )
+from app.services.project_export import create_project_export
 from app.services.users import get_active_users, is_admin
 from app.services.ui_versions import (
     activate_ui_version,
@@ -102,6 +103,39 @@ async def admin_updates_menu_callback(call: CallbackQuery, state: FSMContext):
         reply_markup=admin_updates_menu_keyboard(),
     )
     await call.answer()
+
+
+@router.callback_query(F.data == "admin_export_project")
+async def admin_export_project_callback(call: CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+
+    await call.answer("Готовлю архив")
+    status_message = await call.message.answer(
+        "⏳ Собираю безопасный архив текущей версии без базы, токенов, логов и резервных копий..."
+    )
+    export_path = None
+    try:
+        export_path, file_count, digest = create_project_export()
+        await call.message.answer_document(
+            FSInputFile(export_path, filename=export_path.name),
+            caption=(
+                "📤 <b>Текущая версия BatyaBot2</b>\n\n"
+                f"Файлов: <b>{file_count}</b>\n"
+                f"SHA-256: <code>{digest}</code>\n\n"
+                "В архив не включены .env, токены, рабочая база, резервные копии, логи, venv и Git-метаданные."
+            ),
+        )
+        await status_message.delete()
+    except Exception as exc:
+        logger.exception("Не удалось выгрузить текущую версию проекта")
+        await status_message.edit_text(
+            f"❌ Не удалось собрать архив: <code>{html_escape(str(exc)[:1000])}</code>"
+        )
+    finally:
+        if export_path is not None:
+            Path(export_path).unlink(missing_ok=True)
 
 
 @router.callback_query(F.data == "admin_update_history")

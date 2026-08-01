@@ -3,7 +3,9 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from app.domain import DEPARTMENT_CLIENT
+from app.keyboards.common import ticket_work_menu_keyboard
 from app.keyboards.tickets import ticket_filters_keyboard
+from app.services.ui_messages import delete_trigger_message, send_ui_text
 from app.services.tickets import (
     get_filtered_tickets,
     get_incoming_tickets,
@@ -27,6 +29,42 @@ router = Router()
 async def cmd_menu(message: Message):
     user, admin_flag = await get_current_user_and_admin(message.from_user.id)
     await show_main_menu(message, user, admin_flag)
+
+@router.message(F.text == "📂 Работа с тикетами")
+async def bottom_ticket_work_menu(message: Message):
+    user, admin_flag = await get_current_user_and_admin(message.from_user.id)
+    if not user:
+        await message.answer("Нет доступа.")
+        return
+    if is_observer_role(row_get(user, "role")) and not admin_flag:
+        await message.answer("Для наблюдателя доступны отдельные списки в главном меню.")
+        return
+    await send_ui_text(
+        message.bot,
+        chat_id=message.from_user.id,
+        text="Выберите раздел работы с тикетами:",
+        reply_markup=ticket_work_menu_keyboard(),
+    )
+    await delete_trigger_message(message)
+
+
+@router.callback_query(F.data == "ticket_work_menu")
+async def callback_ticket_work_menu(call: CallbackQuery):
+    user, admin_flag = await get_current_user_and_admin(call.from_user.id)
+    if not user:
+        await call.answer("Нет доступа.", show_alert=True)
+        return
+    if is_observer_role(row_get(user, "role")) and not admin_flag:
+        await call.answer("Для наблюдателя доступны отдельные списки.", show_alert=True)
+        return
+    await send_ui_text(
+        call.bot,
+        chat_id=call.from_user.id,
+        text="Выберите раздел работы с тикетами:",
+        reply_markup=ticket_work_menu_keyboard(),
+    )
+    await call.answer()
+
 
 @router.message(Command("overdue"))
 async def cmd_overdue(message: Message):

@@ -14,6 +14,7 @@ from app.version import get_version
 MAIN_BUTTON_CATALOG: tuple[tuple[str, str], ...] = (
     ("main.create_ticket", "➕ Создать тикет"),
     ("main.order_status", "🔎 Узнать статус заказа"),
+    ("main.ticket_work", "📂 Работа с тикетами"),
     ("main.outgoing", "📤 Исходящие"),
     ("main.incoming", "📥 Входящие"),
     ("main.in_work", "🛠 В работе"),
@@ -35,6 +36,7 @@ REPLY_BUTTONS: dict[str, tuple[str, str]] = {
 CALLBACK_BUTTONS: dict[str, tuple[str, str]] = {
     "create_ticket": ("main.create_ticket", "main"),
     "order_status_start": ("main.order_status", "main"),
+    "ticket_work_menu": ("main.ticket_work", "main"),
     "outgoing_tickets": ("main.outgoing", "main"),
     "incoming_tickets": ("main.incoming", "main"),
     "work_tickets": ("main.in_work", "main"),
