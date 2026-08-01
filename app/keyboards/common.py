@@ -49,6 +49,8 @@ def bottom_menu_for_role(role: str | None = None, is_admin: bool = False) -> Rep
         return ReplyKeyboardMarkup(
             keyboard=keyboard,
             resize_keyboard=True,
+            is_persistent=True,
+            one_time_keyboard=False,
             input_field_placeholder="Выбери действие..."
         )
 
@@ -82,6 +84,8 @@ def bottom_menu_for_role(role: str | None = None, is_admin: bool = False) -> Rep
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
         resize_keyboard=True,
+        is_persistent=True,
+        one_time_keyboard=False,
         input_field_placeholder="Выбери действие..."
     )
 
