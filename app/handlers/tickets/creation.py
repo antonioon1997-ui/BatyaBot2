@@ -15,7 +15,7 @@ from app.keyboards.tickets import (
 )
 from app.services.attachments import create_attachment
 from app.services.ticket_messages import replace_ticket_message_bundle
-from app.services.ui_messages import clear_ui_message_bundle, delete_trigger_message, send_ui_text
+from app.services.ui_messages import clear_ui_message_bundle, send_ui_text
 from app.services.tickets import (
     create_ticket,
     get_ticket_by_id,
@@ -270,7 +270,6 @@ async def callback_duplicate_create_confirm(call: CallbackQuery, state: FSMConte
 @router.message(F.text == "➕ Создать тикет")
 async def bottom_create_ticket(message: Message, state: FSMContext):
     await start_create_ticket(message, state)
-    await delete_trigger_message(message)
 
 @router.callback_query(F.data == "create_ticket")
 async def callback_create_ticket(call: CallbackQuery, state: FSMContext):

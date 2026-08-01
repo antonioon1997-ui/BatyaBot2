@@ -23,7 +23,7 @@ from app.services.order_status import (
     extract_order_number_from_query,
     get_order_status,
 )
-from app.services.ui_messages import UiMessagePart, clear_ui_message_bundle, delete_trigger_message, send_ui_parts, send_ui_text
+from app.services.ui_messages import UiMessagePart, clear_ui_message_bundle, send_ui_parts, send_ui_text
 from app.services.tickets import (
     add_ticket_event,
     create_ticket,
@@ -227,7 +227,6 @@ async def _lookup_and_send(message: Message, state: FSMContext, order_number: st
 @router.message(F.text == "🔎 Узнать статус заказа")
 async def bottom_order_status(message: Message, state: FSMContext):
     await _start_lookup(message, state)
-    await delete_trigger_message(message)
 
 
 @router.callback_query(F.data == "order_status_start")

@@ -5,7 +5,7 @@ from aiogram.types import Message
 from app.config import settings
 from app.keyboards.common import access_request_keyboard, bottom_menu_for_role, main_menu_for_role
 from app.services.preferences import user_text
-from app.services.ui_messages import UiMessagePart, delete_trigger_message, send_ui_parts
+from app.services.ui_messages import UiMessagePart, send_ui_parts
 from app.services.users import create_or_update_access_request, get_user_by_telegram_id
 from app.utils import html_escape
 
@@ -40,7 +40,6 @@ async def cmd_start(message: Message, bot: Bot):
                 ),
             ],
         )
-        await delete_trigger_message(message)
         return
 
     request = await create_or_update_access_request(

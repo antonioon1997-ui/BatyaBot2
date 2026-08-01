@@ -29,7 +29,7 @@ from app.keyboards.admin import (
 )
 from app.keyboards.common import main_menu_for_role
 from app.services.admin_notes import list_notes, get_note, create_note, update_note, delete_note
-from app.services.ui_messages import delete_trigger_message, send_ui_text
+from app.services.ui_messages import send_ui_text
 from app.services.users import (
     get_user_by_telegram_id,
     get_access_requests,
@@ -441,7 +441,6 @@ async def cmd_reminder_time(message: Message, state: FSMContext):
 @router.message(F.text == "⚙️ Админка")
 async def bottom_admin_menu(message: Message):
     await send_admin_menu(message)
-    await delete_trigger_message(message)
 
 
 @router.callback_query(F.data == "admin_menu")

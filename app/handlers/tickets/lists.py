@@ -5,7 +5,7 @@ from aiogram.types import CallbackQuery, Message
 from app.domain import DEPARTMENT_CLIENT
 from app.keyboards.common import ticket_work_menu_keyboard
 from app.keyboards.tickets import ticket_filters_keyboard
-from app.services.ui_messages import delete_trigger_message, send_ui_text
+from app.services.ui_messages import send_ui_text
 from app.services.tickets import (
     get_filtered_tickets,
     get_incoming_tickets,
@@ -45,7 +45,6 @@ async def bottom_ticket_work_menu(message: Message):
         text="Выберите раздел работы с тикетами:",
         reply_markup=ticket_work_menu_keyboard(),
     )
-    await delete_trigger_message(message)
 
 
 @router.callback_query(F.data == "ticket_work_menu")

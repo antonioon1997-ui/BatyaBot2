@@ -23,7 +23,7 @@ from app.keyboards.feedback import admin_feedback_card_keyboard
 from app.presentation.faq import FAQ_GROUPS
 from app.services.feedback import create_feedback
 from app.services.preferences import get_message_style, set_message_style, user_text
-from app.services.ui_messages import delete_trigger_message, send_ui_text
+from app.services.ui_messages import send_ui_text
 from app.services.ui_versions import help_settings_enabled
 from app.services.users import get_user_by_telegram_id
 from app.states import HelpStates
@@ -87,7 +87,6 @@ async def _send_help(target, state: FSMContext | None = None) -> None:
 @router.message(F.text == "❓ Помощь")
 async def bottom_help(message: Message, state: FSMContext):
     await _send_help(message, state)
-    await delete_trigger_message(message)
 
 
 @router.callback_query(F.data == "help_main")
