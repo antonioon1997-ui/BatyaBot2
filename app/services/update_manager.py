@@ -359,6 +359,7 @@ async def _send_update_message_with_retry(
     text: str,
     *,
     attempts: int = 5,
+    reply_markup=None,
 ) -> bool:
     """Отправляет итог обновления с повторами после перезапуска сети/polling."""
     import logging
@@ -366,7 +367,7 @@ async def _send_update_message_with_retry(
     logger = logging.getLogger(__name__)
     for attempt in range(1, attempts + 1):
         try:
-            await bot.send_message(chat_id, text)
+            await bot.send_message(chat_id, text, reply_markup=reply_markup)
             return True
         except TelegramRetryAfter as exc:
             delay = max(float(exc.retry_after), 1.0) + 1.0
@@ -472,6 +473,8 @@ async def deployment_result_watcher(bot) -> None:
                 result: list[str] = []
                 for item in notes:
                     lowered = item.lower()
+                    if lowered.startswith("[admin]"):
+                        continue
                     if lowered.startswith("[client]"):
                         if department == "client":
                             result.append(item[len("[client]"):].strip())
@@ -486,10 +489,10 @@ async def deployment_result_watcher(bot) -> None:
                     result.append(item)
                 return [value for value in result if value]
 
-            admin_notes = []
+            admin_notes: list[str] = []
             for item in notes:
                 clean = item
-                for prefix in ("[client]", "[purchasing]", "[all]"):
+                for prefix in ("[client]", "[purchasing]", "[all]", "[admin]"):
                     if clean.lower().startswith(prefix):
                         clean = clean[len(prefix):].strip()
                         break
@@ -514,11 +517,6 @@ async def deployment_result_watcher(bot) -> None:
                     f"Резервная копия: <code>{html_escape(payload.get('backup_name', '—'))}</code>\n\n"
                     f"<b>Что изменилось:</b>\n{notes_text}"
                 )
-                user_text = (
-                    "✅ <b>Техническое обслуживание завершено</b>\n\n"
-                    f"Бот обновлён до версии <b>{version}</b> и снова готов к работе.\n\n"
-                    f"<b>Что изменилось:</b>\n{notes_text}"
-                )
             else:
                 admin_text = (
                     "↩️ <b>Обновление не установлено — выполнен автоматический откат</b>\n\n"
@@ -526,14 +524,7 @@ async def deployment_result_watcher(bot) -> None:
                     f"Причина: <code>{html_escape(str(payload.get('error', 'неизвестная ошибка'))[:2500])}</code>\n"
                     f"Восстановлена копия: <code>{html_escape(payload.get('backup_name', '—'))}</code>"
                 )
-                user_text = (
-                    "✅ <b>Техническое обслуживание завершено</b>\n\n"
-                    "Обновление было отменено, восстановлена предыдущая рабочая версия. "
-                    "Ботом снова можно пользоваться."
-                )
 
-            # Административный итог всегда отправляем первым и с повторами.
-            # Если ADMIN_ID и инициатор почему-либо различаются, уведомляем обоих.
             admin_recipients = list(dict.fromkeys([primary_admin_id, requested_by]))
             notified_admins = {int(value) for value in payload.get("notified_admins", [])}
             for admin_id in admin_recipients:
@@ -541,42 +532,90 @@ async def deployment_result_watcher(bot) -> None:
                     continue
                 delivered = await _send_update_message_with_retry(bot, admin_id, admin_text)
                 if not delivered:
-                    # RESULT_FILE сохраняем: watcher повторит доставку через несколько секунд.
                     raise RuntimeError(f"Не удалось доставить итог обновления администратору {admin_id}")
                 notified_admins.add(admin_id)
                 payload["notified_admins"] = sorted(notified_admins)
                 _rewrite_result_payload(payload)
 
+            from app.domain import department_by_role
+            from app.keyboards.common import bottom_menu_for_role
             from app.services.users import get_active_users
 
             users = await get_active_users()
+            notified_users = {int(value) for value in payload.get("notified_users", [])}
+            failed_users = {int(value) for value in payload.get("failed_users", [])}
             admin_set = set(admin_recipients)
+
             for user in users:
                 telegram_id = int(user["telegram_id"])
-                if telegram_id in admin_set:
+                if telegram_id in notified_users or telegram_id in failed_users:
                     continue
-                from app.domain import department_by_role
+
                 department = department_by_role(user["role"])
                 user_notes = notes_for_department(department)
                 user_notes_text = "\n".join(f"• {html_escape(item)}" for item in user_notes)
+
                 if status == "success":
+                    if telegram_id in admin_set:
+                        role_user_text = (
+                            "🔄 <b>Меню обновлено автоматически</b>\n\n"
+                            "Новые кнопки уже загружены. Можно продолжать работу.\n\n"
+                            "Если Telegram по какой-то причине оставил старое меню, "
+                            "введите в поле для ввода команду /start."
+                        )
+                    else:
+                        role_user_text = (
+                            "✅ <b>Техническое обслуживание завершено</b>\n\n"
+                            f"Бот обновлён до версии <b>{version}</b> и снова готов к работе.\n"
+                            "Меню обновлено автоматически — можно продолжать работу."
+                        )
+                        if user_notes_text:
+                            role_user_text += f"\n\n<b>Что изменилось:</b>\n{user_notes_text}"
+                        role_user_text += (
+                            "\n\nЕсли Telegram по какой-то причине оставил старое меню, "
+                            "введите в поле для ввода команду /start."
+                        )
+                else:
                     role_user_text = (
                         "✅ <b>Техническое обслуживание завершено</b>\n\n"
-                        f"Бот обновлён до версии <b>{version}</b> и снова готов к работе."
+                        "Обновление было отменено, восстановлена предыдущая рабочая версия. "
+                        "Меню восстановлено автоматически — ботом снова можно пользоваться."
                     )
-                    if user_notes_text:
-                        role_user_text += f"\n\n<b>Что изменилось:</b>\n{user_notes_text}"
-                else:
-                    role_user_text = user_text
-                await _send_update_message_with_retry(
+
+                delivered = await _send_update_message_with_retry(
                     bot,
                     telegram_id,
                     role_user_text,
                     attempts=3,
+                    reply_markup=bottom_menu_for_role(
+                        user["role"],
+                        is_admin=telegram_id == primary_admin_id,
+                    ),
                 )
+                if not delivered:
+                    failed_users.add(telegram_id)
+                    payload["failed_users"] = sorted(failed_users)
+                    _rewrite_result_payload(payload)
+                    continue
+
+                notified_users.add(telegram_id)
+                payload["notified_users"] = sorted(notified_users)
+                _rewrite_result_payload(payload)
+
+            if failed_users and not payload.get("failed_users_reported"):
+                failed_text = ", ".join(str(value) for value in sorted(failed_users))
+                warning_text = (
+                    "⚠️ <b>Не всем пользователям удалось обновить меню</b>\n\n"
+                    f"Не доставлено: <b>{len(failed_users)}</b>. "
+                    "Возможно, эти пользователи заблокировали бота или давно не открывали чат.\n"
+                    f"Telegram ID: <code>{html_escape(failed_text)}</code>"
+                )
+                for admin_id in admin_recipients:
+                    await _send_update_message_with_retry(bot, admin_id, warning_text, attempts=3)
+                payload["failed_users_reported"] = True
+                _rewrite_result_payload(payload)
 
             RESULT_FILE.unlink(missing_ok=True)
         except Exception:
             logger.exception("Не удалось обработать итог системного обновления; будет повторная попытка")
             await asyncio.sleep(10)
-

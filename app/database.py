@@ -300,6 +300,22 @@ async def init_db():
     """)
 
     await db.execute("""
+        CREATE TABLE IF NOT EXISTS ui_button_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            role TEXT,
+            department TEXT NOT NULL,
+            button_id TEXT NOT NULL,
+            button_text TEXT,
+            source TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            app_version TEXT,
+            ui_version TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    await db.execute("""
         CREATE TABLE IF NOT EXISTS daily_stats (
             stat_date TEXT PRIMARY KEY,
             total_open INTEGER NOT NULL DEFAULT 0,
@@ -374,6 +390,10 @@ async def init_db():
     await db.execute("CREATE INDEX IF NOT EXISTS idx_feedback_status_created ON feedback_messages(status, created_at)")
     await db.execute("CREATE INDEX IF NOT EXISTS idx_polls_status_created ON polls(status, created_at)")
     await db.execute("CREATE INDEX IF NOT EXISTS idx_poll_votes_poll_choice ON poll_votes(poll_id, choice_key)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_ui_button_events_created ON ui_button_events(created_at)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_ui_button_events_button_created ON ui_button_events(button_id, created_at)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_ui_button_events_user_created ON ui_button_events(user_id, created_at)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_ui_button_events_department_created ON ui_button_events(department, created_at)")
 
     await db.execute("""
         INSERT OR IGNORE INTO settings (key, value)

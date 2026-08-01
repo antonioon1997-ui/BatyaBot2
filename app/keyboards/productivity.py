@@ -141,6 +141,7 @@ def daily_summary_confirm_keyboard(stat_date: str) -> InlineKeyboardMarkup:
 def admin_analytics_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Обновить показатели", callback_data="admin_analytics")],
+        [InlineKeyboardButton(text="🖱 Метрики кнопок", callback_data="admin_ui_metrics")],
         [InlineKeyboardButton(text="📄 Выгрузить CSV", callback_data="admin_stats_export")],
         [InlineKeyboardButton(text="⬅️ Админка", callback_data="admin_menu")],
     ])
