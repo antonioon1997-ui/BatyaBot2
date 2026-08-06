@@ -5,13 +5,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app.domain import OPEN_STATUSES
-from app.keyboards.tickets import delayed_close_keyboard, ticket_action_keyboard
+from app.keyboards.tickets import ticket_action_keyboard
 from app.services.tickets import (
-    AUTO_CLOSE_MINUTES,
     add_ticket_comment,
     cancel_ticket_auto_close,
     get_ticket_by_id,
-    schedule_ticket_auto_close,
     take_ticket,
     update_ticket_status,
 )
@@ -149,10 +147,12 @@ async def _submit_comment_text(target, state: FSMContext, comment_text: str):
 
     if close_after_comment and can_user_resolve_ticket(ticket, user):
         if is_client_to_purchasing_ticket(ticket):
-            changed = await schedule_ticket_auto_close(
+            changed = await update_ticket_status(
                 ticket_id,
-                user_id,
+                "done",
+                actor_telegram_id=user_id,
                 comment=comment_text,
+                expected_statuses=("new", "in_work"),
             )
             if not changed:
                 await state.clear()
@@ -160,17 +160,12 @@ async def _submit_comment_text(target, state: FSMContext, comment_text: str):
                 if isinstance(target, CallbackQuery):
                     await target.answer()
                 return
-            result_text = (
-                f"✅ Комментарий добавлен, тикет #{ticket_id} помечен выполненным "
-                f"и будет автоматически закрыт через {AUTO_CLOSE_MINUTES} минут."
-            )
+            result_text = f"✅ Комментарий добавлен, тикет #{ticket_id} выполнен и закрыт."
             notify_text = (
                 f"✅ Новый ответ в тикете #{ticket_id}.\n\n"
                 f"{safe_comment}\n\n"
-                f"Тикет помечен как выполненный. Если не будет новых действий, "
-                f"он автоматически закроется через {AUTO_CLOSE_MINUTES} минут."
+                "Тикет закрыт как выполненный. Если вопрос ещё актуален — верни его в работу."
             )
-            delayed_close_markup = delayed_close_keyboard(ticket_id)
         else:
             changed = await update_ticket_status(
                 ticket_id,
@@ -257,13 +252,12 @@ async def ticket_resolve_callback(call: CallbackQuery):
         return
 
     if is_client_to_purchasing_ticket(ticket):
-        changed = await schedule_ticket_auto_close(
+        changed = await update_ticket_status(
             ticket_id,
-            call.from_user.id,
-            comment=(
-                "Исполнитель пометил тикет выполненным. "
-                f"Назначено автоматическое закрытие через {AUTO_CLOSE_MINUTES} минут."
-            ),
+            "done",
+            actor_telegram_id=call.from_user.id,
+            comment="Исполнитель выполнил тикет. Тикет закрыт без таймера ожидания.",
+            expected_statuses=("new", "in_work"),
         )
         if not changed:
             await call.answer("Действие уже неактуально: состояние тикета изменилось.", show_alert=True)
@@ -277,11 +271,9 @@ async def ticket_resolve_callback(call: CallbackQuery):
             bot=call.bot,
             ticket=updated_ticket,
             text=(
-                f"✅ Тикет #{ticket_id} помечен как выполненный.\n\n"
-                f"Если не будет новых действий, он автоматически закроется "
-                f"через {AUTO_CLOSE_MINUTES} минут."
+                f"✅ Тикет #{ticket_id} выполнен и закрыт.\n\n"
+                "Если вопрос ещё актуален — верни тикет в работу."
             ),
-            reply_markup=delayed_close_keyboard(ticket_id),
         )
     else:
         changed = await update_ticket_status(

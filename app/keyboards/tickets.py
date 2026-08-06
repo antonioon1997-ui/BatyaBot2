@@ -63,11 +63,40 @@ def open_ticket_keyboard(ticket_id: int, *, can_cancel: bool = False) -> InlineK
 def ticket_notification_keyboard(ticket, user=None) -> InlineKeyboardMarkup:
     user_id = int(row_get(user, "telegram_id", 0) or 0)
     creator_id = int(row_get(ticket, "created_by", 0) or 0)
+    ticket_id = int(row_get(ticket, "id"))
     status = str(row_get(ticket, "status", ""))
-    return open_ticket_keyboard(
-        int(row_get(ticket, "id")),
-        can_cancel=(user_id == creator_id and status not in {"done", "cancelled"}),
+    role = row_get(user, "role")
+
+    rows = []
+    if user_id == creator_id:
+        if status not in {"done", "cancelled"}:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="❌ Закрыть как неактуальный",
+                        callback_data=f"ticket_cancel:{ticket_id}",
+                    )
+                ]
+            )
+        elif department_by_role(role) == "client":
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="↩️ Вернуть в работу",
+                        callback_data=f"ticket_return:{ticket_id}",
+                    )
+                ]
+            )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="📂 Открыть тикет",
+                callback_data=f"ticket_open:{ticket_id}",
+            )
+        ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def delayed_close_keyboard(ticket_id: int) -> InlineKeyboardMarkup:
