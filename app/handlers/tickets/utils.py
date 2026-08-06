@@ -16,7 +16,8 @@ from app.domain import (
     is_observer_role,
 )
 from app.keyboards.common import main_menu_for_role
-from app.keyboards.tickets import open_ticket_keyboard, ticket_action_keyboard
+from app.keyboards.tickets import open_ticket_keyboard, ticket_action_keyboard, ticket_notification_keyboard
+from app.services.ticket_messages import send_live_ticket_text
 from app.services.tickets import get_active_users_by_department, get_ticket_by_id
 from app.services.users import get_user_by_telegram_id, is_admin
 from app.utils import html_escape
@@ -331,17 +332,19 @@ def can_creator_control_ticket(ticket, user) -> bool:
 
 
 def can_participant_cancel_ticket(ticket, user, admin_flag: bool = False) -> bool:
-    """Разрешает досрочное закрытие только отделу, который создал тикет."""
+    """Разрешает закрыть тикет как неактуальный его автору или администратору."""
     if not ticket or not user or is_closed_status(row_get(ticket, "status")):
         return False
 
     if is_observer_role(row_get(user, "role")):
         return False
 
-    user_department = department_by_role(row_get(user, "role"))
-    requester_department = row_get(ticket, "requester_department")
+    if admin_flag:
+        return True
 
-    return bool(user_department) and user_department == requester_department
+    user_id = int(row_get(user, "telegram_id", 0) or 0)
+    created_by = int(row_get(ticket, "created_by", 0) or 0)
+    return bool(user_id) and user_id == created_by
 
 def can_user_return_ticket(ticket, user, admin_flag: bool = False) -> bool:
     if admin_flag:
@@ -370,21 +373,22 @@ def is_client_to_purchasing_ticket(ticket) -> bool:
 
 async def notify_ticket_creator(bot, ticket, text: str, reply_markup=None):
     creator_id = int(row_get(ticket, "created_by", 0))
+    if not creator_id:
+        return
 
-    if creator_id:
-        try:
-            await send_long_to_user(
-                bot=bot,
-                chat_id=creator_id,
-                text=text,
-                reply_markup=(
-                    reply_markup
-                    if reply_markup is not None
-                    else open_ticket_keyboard(int(row_get(ticket, "id")))
-                )
-            )
-        except Exception:
-            logger.exception("Не удалось уведомить автора тикета %s", row_get(ticket, "id"))
+    try:
+        creator = await get_user_by_telegram_id(creator_id)
+        keyboard = reply_markup if reply_markup is not None else ticket_notification_keyboard(ticket, creator)
+        await send_live_ticket_text(
+            bot,
+            chat_id=creator_id,
+            ticket_id=int(row_get(ticket, "id")),
+            text=text,
+            reply_markup=keyboard,
+        )
+    except Exception:
+        logger.exception("Не удалось уведомить автора тикета %s", row_get(ticket, "id"))
+
 
 async def notify_department_about_ticket(
     bot,
@@ -394,45 +398,39 @@ async def notify_department_about_ticket(
     ticket_id: int | None = None,
     use_ticket_actions: bool = False,
 ):
-    ticket = None
-
-    if ticket_id is not None:
-        ticket = await get_ticket_by_id(ticket_id)
-
+    ticket = await get_ticket_by_id(ticket_id) if ticket_id is not None else None
     users = await get_active_users_by_department(department)
 
     for user in users:
         telegram_id = int(user["telegram_id"])
-
         if exclude_telegram_id and telegram_id == exclude_telegram_id:
             continue
-
-        user_row = user
-        user_department = department_by_role(user_row["role"])
-
-        if user_department != department:
+        if department_by_role(user["role"]) != department:
             continue
 
         if use_ticket_actions and ticket:
-            keyboard = ticket_action_keyboard(
-                ticket=ticket,
-                user=user_row,
-                is_admin=False,
-            )
+            keyboard = ticket_action_keyboard(ticket=ticket, user=user, is_admin=False)
         elif ticket:
-            keyboard = open_ticket_keyboard(int(row_get(ticket, "id")))
+            keyboard = ticket_notification_keyboard(ticket, user)
         else:
-            keyboard = main_menu_for_role(
-                role=row_get(user_row, "role"),
-                is_admin=False,
-            )
+            keyboard = main_menu_for_role(role=row_get(user, "role"), is_admin=False)
 
         try:
-            await send_long_to_user(
-                bot=bot,
-                chat_id=telegram_id,
-                text=text,
-                reply_markup=keyboard
-            )
+            if ticket:
+                await send_live_ticket_text(
+                    bot,
+                    chat_id=telegram_id,
+                    ticket_id=int(row_get(ticket, "id")),
+                    text=text,
+                    reply_markup=keyboard,
+                )
+            else:
+                await send_long_to_user(
+                    bot=bot,
+                    chat_id=telegram_id,
+                    text=text,
+                    reply_markup=keyboard,
+                )
         except Exception:
             logger.exception("Не удалось отправить уведомление пользователю %s", telegram_id)
+

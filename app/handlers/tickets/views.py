@@ -21,6 +21,8 @@ from app.keyboards.tickets import (
 )
 from app.services.attachments import get_ticket_attachments
 from app.services.preferences import user_text
+from app.services.ticket_messages import delete_message_ids, replace_ticket_message_bundle
+from app.services.ui_messages import UiMessagePart, send_ui_parts, send_ui_text
 from app.services.work_management import mark_ticket_read
 from app.services.tickets import (
     get_archive_incoming_tickets,
@@ -34,7 +36,6 @@ from app.services.tickets import (
 from app.utils import format_moscow_datetime, html_escape
 
 from .utils import (
-    answer_long,
     get_author_name_from_ticket,
     get_current_user_and_admin,
     get_department_name,
@@ -55,81 +56,121 @@ async def show_main_menu(message_or_call, user=None, admin_flag: bool = False):
         user, admin_flag = await get_current_user_and_admin(telegram_id)
 
     telegram_id = int(message_or_call.from_user.id)
-    text = "Главное меню."
     action_prompt = await user_text(telegram_id, "main_menu_title")
-
+    await send_ui_parts(
+        message_or_call.bot,
+        chat_id=telegram_id,
+        parts=[
+            UiMessagePart(
+                "Главное меню.",
+                bottom_menu_for_role(
+                    role=row_get(user, "role"),
+                    is_admin=admin_flag,
+                ),
+            ),
+            UiMessagePart(
+                action_prompt,
+                main_menu_for_role(
+                    role=row_get(user, "role"),
+                    is_admin=admin_flag,
+                ),
+            ),
+        ],
+    )
     if isinstance(message_or_call, CallbackQuery):
-        await message_or_call.message.answer(
-            text,
-            reply_markup=bottom_menu_for_role(
-                role=row_get(user, "role"),
-                is_admin=admin_flag,
-            )
-        )
-
-        await message_or_call.message.answer(
-            action_prompt,
-            reply_markup=main_menu_for_role(
-                role=row_get(user, "role"),
-                is_admin=admin_flag,
-            )
-        )
-
         await message_or_call.answer()
-    else:
-        await message_or_call.answer(
-            text,
-            reply_markup=bottom_menu_for_role(
-                role=row_get(user, "role"),
-                is_admin=admin_flag,
-            )
-        )
 
-        await message_or_call.answer(
-            action_prompt,
-            reply_markup=main_menu_for_role(
-                role=row_get(user, "role"),
-                is_admin=admin_flag,
-            )
-        )
 
-async def send_ticket_attachments(message_or_call, ticket_id: int, attachments):
+async def _send_primary_ui(message_or_call, text: str, reply_markup=None) -> None:
+    await send_ui_text(
+        message_or_call.bot,
+        chat_id=int(message_or_call.from_user.id),
+        text=text,
+        reply_markup=reply_markup,
+    )
+
+
+async def _send_text_collect(bot, chat_id: int, text: str, reply_markup=None) -> list[int]:
+    from .utils import split_long_text
+
+    chunks = split_long_text(text)
+    sent_ids: list[int] = []
+    for index, chunk in enumerate(chunks):
+        message = await bot.send_message(
+            chat_id=chat_id,
+            text=chunk,
+            reply_markup=reply_markup if index == len(chunks) - 1 else None,
+        )
+        sent_ids.append(int(message.message_id))
+    return sent_ids
+
+
+def _ticket_media_caption(ticket, comments, attachment_count: int) -> str:
+    """Короткая HTML-подпись, гарантированно помещающаяся под вложением."""
+    lines = [
+        f"🎫 <b>Тикет #{int(row_get(ticket, 'id'))}</b>",
+        f"📌 Статус: {get_status_name(row_get(ticket, 'status'))}",
+    ]
+    assignee = row_get(ticket, "assignee_full_name") or row_get(ticket, "assignee_username")
+    if assignee:
+        lines.append(f"👤 Исполнитель: {html_escape(str(assignee))}")
+    order_number = row_get(ticket, "order_number")
+    if has_text_value(order_number):
+        lines.append(f"🔢 Заказ: {html_escape(str(order_number))}")
+    lines.append(f"🕒 Создан: {format_moscow_datetime(row_get(ticket, 'created_at'))}")
+    lines.append("")
+    lines.append(f"📝 {short_text(row_get(ticket, 'description'), 300)}")
+    if comments:
+        latest = comments[-1]
+        author = row_get(latest, "author_name") or row_get(latest, "author_username") or row_get(latest, "author_telegram_id")
+        lines.append("")
+        lines.append(f"💬 Последнее дополнение — {html_escape(str(author))}:")
+        lines.append(short_text(row_get(latest, "text"), 160))
+    if attachment_count > 1:
+        lines.append("")
+        lines.append(f"📎 Вложений: {attachment_count}")
+    return "\n".join(lines)
+
+
+async def send_ticket_attachments(
+    message_or_call,
+    ticket_id: int,
+    attachments,
+    *,
+    primary_caption: str,
+    primary_markup=None,
+) -> list[int]:
     if not attachments:
-        return
+        return []
 
-    chat_id = message_or_call.from_user.id
+    chat_id = int(message_or_call.from_user.id)
     bot = message_or_call.bot
+    sent_ids: list[int] = []
 
-    for attachment in attachments:
+    for index, attachment in enumerate(attachments):
         file_id = row_get(attachment, "file_id")
         file_type = row_get(attachment, "file_type")
-
         if not file_id:
             continue
 
-        caption = f"📎 Вложение к тикету #{ticket_id}"
-
+        caption = primary_caption if index == 0 else f"📎 Вложение {index + 1} к тикету #{ticket_id}"
+        markup = primary_markup if index == 0 else None
         try:
             if file_type == "photo":
-                await bot.send_photo(
-                    chat_id=chat_id,
-                    photo=file_id,
-                    caption=caption
-                )
+                message = await bot.send_photo(chat_id=chat_id, photo=file_id, caption=caption, reply_markup=markup)
             elif file_type == "document":
-                await bot.send_document(
-                    chat_id=chat_id,
-                    document=file_id,
-                    caption=caption
-                )
+                message = await bot.send_document(chat_id=chat_id, document=file_id, caption=caption, reply_markup=markup)
             elif file_type == "video":
-                await bot.send_video(
-                    chat_id=chat_id,
-                    video=file_id,
-                    caption=caption
-                )
+                message = await bot.send_video(chat_id=chat_id, video=file_id, caption=caption, reply_markup=markup)
+            else:
+                continue
+            sent_ids.append(int(message.message_id))
         except Exception:
             logger.exception("Не удалось отправить вложение тикета %s", ticket_id)
+            if index == 0:
+                raise
+
+    return sent_ids
 
 async def send_ticket_card(message_or_call, ticket, user=None, admin_flag: bool = False):
     if not ticket:
@@ -167,7 +208,7 @@ async def send_ticket_card(message_or_call, ticket, user=None, admin_flag: bool 
     attachments_text = ""
 
     if attachments:
-        attachments_text = f"\n\n📎 Вложения: {len(attachments)} шт. Они будут отправлены отдельными сообщениями ниже."
+        attachments_text = f"\n\n📎 Вложения: {len(attachments)} шт."
 
     order_line = optional_line("🔢 Заказ: ", row_get(ticket, "order_number"))
     closed_ticket = is_closed_status(row_get(ticket, "status"))
@@ -281,30 +322,58 @@ async def send_ticket_card(message_or_call, ticket, user=None, admin_flag: bool 
         is_admin=admin_flag,
     )
 
-    await answer_long(message_or_call, text, reply_markup=keyboard)
+    chat_id = int(message_or_call.from_user.id)
+    bot = message_or_call.bot
+    sent_ids: list[int] = []
     try:
-        await mark_ticket_read(int(ticket["id"]), int(message_or_call.from_user.id))
+        if attachments:
+            media_caption = text if len(text) <= 900 else _ticket_media_caption(ticket, comments, len(attachments))
+            sent_ids.extend(
+                await send_ticket_attachments(
+                    message_or_call=message_or_call,
+                    ticket_id=int(ticket["id"]),
+                    attachments=attachments,
+                    primary_caption=media_caption,
+                    primary_markup=keyboard,
+                )
+            )
+            if media_caption != text:
+                sent_ids.extend(await _send_text_collect(bot, chat_id, text))
+        else:
+            sent_ids.extend(await _send_text_collect(bot, chat_id, text, reply_markup=keyboard))
+
+        if not sent_ids:
+            sent_ids.extend(await _send_text_collect(bot, chat_id, text, reply_markup=keyboard))
+
+        await replace_ticket_message_bundle(
+            bot,
+            chat_id=chat_id,
+            ticket_id=int(ticket["id"]),
+            new_message_ids=sent_ids,
+        )
+    except Exception:
+        await delete_message_ids(bot, chat_id, sent_ids)
+        logger.exception("Не удалось показать карточку тикета %s", ticket["id"])
+        if isinstance(message_or_call, CallbackQuery):
+            await message_or_call.answer("Не удалось открыть тикет. Попробуйте ещё раз.", show_alert=True)
+        else:
+            await message_or_call.answer("Не удалось открыть тикет. Попробуйте ещё раз.")
+        return
+
+    try:
+        await mark_ticket_read(int(ticket["id"]), chat_id)
     except Exception:
         logger.exception("Не удалось отметить тикет %s прочитанным", ticket["id"])
 
     if isinstance(message_or_call, CallbackQuery):
         await message_or_call.answer()
 
-    if attachments:
-        await send_ticket_attachments(
-            message_or_call=message_or_call,
-            ticket_id=int(ticket["id"]),
-            attachments=attachments,
-        )
-
 async def send_tickets_list(message_or_call, title: str, tickets):
     if not tickets:
         empty_text = await user_text(message_or_call.from_user.id, "no_tickets")
+        await _send_primary_ui(message_or_call, f"{title}\n\n{empty_text}")
         if isinstance(message_or_call, CallbackQuery):
-            await message_or_call.message.answer(f"{title}\n\n{empty_text}")
             await message_or_call.answer()
-        else:
-            await message_or_call.answer(f"{title}\n\n{empty_text}")
         return
 
     lines = [title, ""]
@@ -335,20 +404,16 @@ async def send_tickets_list(message_or_call, title: str, tickets):
         list_type = "archive"
     keyboard = tickets_list_keyboard(tickets, list_type=list_type)
 
+    await _send_primary_ui(message_or_call, text, reply_markup=keyboard)
     if isinstance(message_or_call, CallbackQuery):
-        await answer_long(message_or_call, text, reply_markup=keyboard)
         await message_or_call.answer()
-    else:
-        await answer_long(message_or_call, text, reply_markup=keyboard)
 
 async def send_archive_menu(message_or_call):
     text = "📦 Архив тикетов\n\nВыбери, какой архив открыть."
 
+    await _send_primary_ui(message_or_call, text, reply_markup=archive_menu_keyboard())
     if isinstance(message_or_call, CallbackQuery):
-        await message_or_call.message.answer(text, reply_markup=archive_menu_keyboard())
         await message_or_call.answer()
-    else:
-        await message_or_call.answer(text, reply_markup=archive_menu_keyboard())
 
 def build_archive_text(tickets, title: str, page: int = 0, page_size: int = 10) -> str:
     total = len(tickets)
@@ -417,12 +482,9 @@ async def send_archive_page(message_or_call, archive_type: str, page: int = 0):
         empty_text = await user_text(message_or_call.from_user.id, "no_archive_tickets")
         text = f"{title}\n\n{empty_text}"
 
+        await _send_primary_ui(message_or_call, text, reply_markup=archive_menu_keyboard())
         if isinstance(message_or_call, CallbackQuery):
-            await message_or_call.message.answer(text, reply_markup=archive_menu_keyboard())
             await message_or_call.answer()
-        else:
-            await message_or_call.answer(text, reply_markup=archive_menu_keyboard())
-
         return
 
     total_pages = (len(tickets) + 10 - 1) // 10
@@ -436,11 +498,9 @@ async def send_archive_page(message_or_call, archive_type: str, page: int = 0):
     text = build_archive_text(tickets, title, page=page, page_size=10)
     keyboard = archive_tickets_keyboard(tickets, archive_type=archive_type, page=page, page_size=10)
 
+    await _send_primary_ui(message_or_call, text, reply_markup=keyboard)
     if isinstance(message_or_call, CallbackQuery):
-        await answer_long(message_or_call, text, reply_markup=keyboard)
         await message_or_call.answer()
-    else:
-        await answer_long(message_or_call, text, reply_markup=keyboard)
 
 def build_overdue_text(tickets, page: int = 0, page_size: int = 10) -> str:
     total = len(tickets)
@@ -518,11 +578,9 @@ async def send_overdue_page(message_or_call, page: int = 0):
     tickets = await get_overdue_client_tickets()
 
     if not tickets:
+        await _send_primary_ui(message_or_call, "Просроченных тикетов сейчас нет.")
         if isinstance(message_or_call, CallbackQuery):
-            await message_or_call.message.answer("Просроченных тикетов сейчас нет.")
             await message_or_call.answer()
-        else:
-            await message_or_call.answer("Просроченных тикетов сейчас нет.")
         return
 
     total_pages = (len(tickets) + 10 - 1) // 10
@@ -536,11 +594,9 @@ async def send_overdue_page(message_or_call, page: int = 0):
     text = build_overdue_text(tickets, page=page, page_size=10)
     keyboard = overdue_tickets_keyboard(tickets, page=page, page_size=10)
 
+    await _send_primary_ui(message_or_call, text, reply_markup=keyboard)
     if isinstance(message_or_call, CallbackQuery):
-        await answer_long(message_or_call, text, reply_markup=keyboard)
         await message_or_call.answer()
-    else:
-        await answer_long(message_or_call, text, reply_markup=keyboard)
 
 def build_observer_tickets_text(tickets, title: str, page: int = 0, page_size: int = 10) -> str:
     total = len(tickets)
@@ -602,12 +658,13 @@ async def send_observer_tickets_page(message_or_call, list_type: str, page: int 
         empty_text = await user_text(message_or_call.from_user.id, "no_tickets")
         text = f"{title}\n\n{empty_text}"
 
+        await _send_primary_ui(
+            message_or_call,
+            text,
+            reply_markup=main_menu_for_role(row_get(user, "role")),
+        )
         if isinstance(message_or_call, CallbackQuery):
-            await message_or_call.message.answer(text, reply_markup=main_menu_for_role(row_get(user, "role")))
             await message_or_call.answer()
-        else:
-            await message_or_call.answer(text, reply_markup=main_menu_for_role(row_get(user, "role")))
-
         return
 
     total_pages = (len(tickets) + 10 - 1) // 10
@@ -621,11 +678,9 @@ async def send_observer_tickets_page(message_or_call, list_type: str, page: int 
     text = build_observer_tickets_text(tickets, title, page=page, page_size=10)
     keyboard = observer_tickets_keyboard(tickets, list_type=list_type, page=page, page_size=10)
 
+    await _send_primary_ui(message_or_call, text, reply_markup=keyboard)
     if isinstance(message_or_call, CallbackQuery):
-        await answer_long(message_or_call, text, reply_markup=keyboard)
         await message_or_call.answer()
-    else:
-        await answer_long(message_or_call, text, reply_markup=keyboard)
 
 def format_minutes(value) -> str:
     if value is None:
@@ -685,8 +740,6 @@ async def send_observer_stats_menu(message_or_call):
 
     text = "📊 Статистика\n\nВыбери тип отчёта."
 
+    await _send_primary_ui(message_or_call, text, reply_markup=observer_stats_menu_keyboard())
     if isinstance(message_or_call, CallbackQuery):
-        await message_or_call.message.answer(text, reply_markup=observer_stats_menu_keyboard())
         await message_or_call.answer()
-    else:
-        await message_or_call.answer(text, reply_markup=observer_stats_menu_keyboard())

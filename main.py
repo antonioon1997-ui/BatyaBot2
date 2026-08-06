@@ -11,6 +11,7 @@ from app.handlers import start, admin, admin_feedback, admin_productivity, admin
 from app.scheduler import start_scheduler
 from app.pending_updates import collect_and_discard_pending_updates
 from app.middlewares import UiMetricsMiddleware
+from app.services.bot_menu import configure_bot_command_menu
 from app.services.update_manager import mark_runtime_ready, deployment_result_watcher
 from app.services.ui_versions import ensure_ui_versions
 
@@ -49,6 +50,7 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=False)
     await collect_and_discard_pending_updates(bot)
     await bot.get_me()
+    await configure_bot_command_menu(bot)
     mark_runtime_ready()
     asyncio.create_task(deployment_result_watcher(bot))
     await dp.start_polling(bot)

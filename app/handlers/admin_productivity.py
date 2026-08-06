@@ -11,8 +11,6 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from app.config import settings
 from app.keyboards.productivity import (
     admin_analytics_keyboard,
-    admin_template_card_keyboard,
-    admin_templates_keyboard,
     restore_day_off_keyboard,
 )
 from app.services.analytics import (
@@ -21,16 +19,8 @@ from app.services.analytics import (
     get_daily_summary,
     mark_daily_summary_observers_sent,
 )
-from app.services.templates import (
-    create_response_template,
-    get_response_template,
-    get_response_templates,
-    update_response_template,
-)
 from app.services.users import get_user_by_telegram_id, get_users_by_role
 from app.services.work_management import clear_day_off, restore_day_off_tickets, set_day_off
-from app.states import AdminProductivityStates
-from app.utils import html_escape
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -51,172 +41,13 @@ async def _deny(call_or_message) -> bool:
     return True
 
 
-def _template_card_text(template) -> str:
-    return (
-        f"💬 <b>Шаблон #{template['id']}</b>\n\n"
-        f"Название: <b>{html_escape(template['title'])}</b>\n"
-        f"Статус: {'активен' if template['is_active'] else 'отключён'}\n\n"
-        f"Текст:\n{html_escape(template['body'])}"
-    )
-
-
 @router.callback_query(F.data == "admin_templates")
-async def callback_admin_templates(call: CallbackQuery):
-    if await _deny(call):
-        return
-    templates = await get_response_templates("purchasing", include_inactive=True)
-    await call.message.answer(
-        "💬 <b>Шаблоны ответов отдела закупки</b>\n\n"
-        "Отключённые шаблоны сохраняются, но не показываются сотрудникам при ответе.",
-        reply_markup=admin_templates_keyboard(templates),
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("admin_tpl:") & ~F.data.startswith("admin_tpl_add"))
-async def callback_admin_template_card(call: CallbackQuery):
-    if await _deny(call):
-        return
-    template_id = int(call.data.split(":")[1])
-    template = await get_response_template(template_id)
-    if not template:
-        await call.answer("Шаблон не найден.", show_alert=True)
-        return
-    await call.message.answer(
-        _template_card_text(template),
-        reply_markup=admin_template_card_keyboard(template_id, bool(template["is_active"])),
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data == "admin_tpl_add")
-async def callback_admin_template_add(call: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data.startswith("admin_tpl"))
+async def callback_admin_templates_disabled(call: CallbackQuery, state: FSMContext):
     if await _deny(call):
         return
     await state.clear()
-    await state.set_state(AdminProductivityStates.waiting_template_title)
-    await call.message.answer("Напиши короткое название нового шаблона.")
-    await call.answer()
-
-
-@router.message(AdminProductivityStates.waiting_template_title)
-async def process_admin_template_title(message: Message, state: FSMContext):
-    if await _deny(message):
-        await state.clear()
-        return
-    if not message.text or not message.text.strip():
-        await message.answer("Название должно быть текстом.")
-        return
-    await state.update_data(template_title=message.text.strip()[:80])
-    await state.set_state(AdminProductivityStates.waiting_template_body)
-    await message.answer("Теперь отправь полный текст шаблона.")
-
-
-@router.message(AdminProductivityStates.waiting_template_body)
-async def process_admin_template_body(message: Message, state: FSMContext):
-    if await _deny(message):
-        await state.clear()
-        return
-    if not message.text or not message.text.strip():
-        await message.answer("Текст шаблона не может быть пустым.")
-        return
-    data = await state.get_data()
-    template_id = await create_response_template(
-        data["template_title"],
-        message.text.strip()[:3000],
-        message.from_user.id,
-        "purchasing",
-    )
-    await state.clear()
-    template = await get_response_template(template_id)
-    await message.answer(
-        "✅ Шаблон создан.\n\n" + _template_card_text(template),
-        reply_markup=admin_template_card_keyboard(template_id, True),
-    )
-
-
-@router.callback_query(F.data.startswith("admin_tpl_edit_title:"))
-async def callback_admin_template_edit_title(call: CallbackQuery, state: FSMContext):
-    if await _deny(call):
-        return
-    template_id = int(call.data.split(":")[1])
-    if not await get_response_template(template_id):
-        await call.answer("Шаблон не найден.", show_alert=True)
-        return
-    await state.clear()
-    await state.set_state(AdminProductivityStates.waiting_template_edit_title)
-    await state.update_data(template_id=template_id)
-    await call.message.answer("Отправь новое название шаблона.")
-    await call.answer()
-
-
-@router.message(AdminProductivityStates.waiting_template_edit_title)
-async def process_admin_template_edit_title(message: Message, state: FSMContext):
-    if await _deny(message):
-        await state.clear()
-        return
-    if not message.text or not message.text.strip():
-        await message.answer("Название должно быть текстом.")
-        return
-    data = await state.get_data()
-    await update_response_template(int(data["template_id"]), title=message.text.strip()[:80])
-    template = await get_response_template(int(data["template_id"]))
-    await state.clear()
-    await message.answer(
-        "✅ Название обновлено.\n\n" + _template_card_text(template),
-        reply_markup=admin_template_card_keyboard(template["id"], bool(template["is_active"])),
-    )
-
-
-@router.callback_query(F.data.startswith("admin_tpl_edit_body:"))
-async def callback_admin_template_edit_body(call: CallbackQuery, state: FSMContext):
-    if await _deny(call):
-        return
-    template_id = int(call.data.split(":")[1])
-    if not await get_response_template(template_id):
-        await call.answer("Шаблон не найден.", show_alert=True)
-        return
-    await state.clear()
-    await state.set_state(AdminProductivityStates.waiting_template_edit_body)
-    await state.update_data(template_id=template_id)
-    await call.message.answer("Отправь новый полный текст шаблона.")
-    await call.answer()
-
-
-@router.message(AdminProductivityStates.waiting_template_edit_body)
-async def process_admin_template_edit_body(message: Message, state: FSMContext):
-    if await _deny(message):
-        await state.clear()
-        return
-    if not message.text or not message.text.strip():
-        await message.answer("Текст шаблона не может быть пустым.")
-        return
-    data = await state.get_data()
-    await update_response_template(int(data["template_id"]), body=message.text.strip()[:3000])
-    template = await get_response_template(int(data["template_id"]))
-    await state.clear()
-    await message.answer(
-        "✅ Текст обновлён.\n\n" + _template_card_text(template),
-        reply_markup=admin_template_card_keyboard(template["id"], bool(template["is_active"])),
-    )
-
-
-@router.callback_query(F.data.startswith("admin_tpl_toggle:"))
-async def callback_admin_template_toggle(call: CallbackQuery):
-    if await _deny(call):
-        return
-    template_id = int(call.data.split(":")[1])
-    template = await get_response_template(template_id)
-    if not template:
-        await call.answer("Шаблон не найден.", show_alert=True)
-        return
-    await update_response_template(template_id, is_active=not bool(template["is_active"]))
-    updated = await get_response_template(template_id)
-    await call.message.answer(
-        _template_card_text(updated),
-        reply_markup=admin_template_card_keyboard(template_id, bool(updated["is_active"])),
-    )
-    await call.answer("Статус изменён.")
+    await call.answer("Шаблоны ответов отключены.", show_alert=True)
 
 
 @router.callback_query(F.data == "admin_analytics")

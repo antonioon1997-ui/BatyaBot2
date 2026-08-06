@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sqlite3
+import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -81,15 +82,19 @@ async def run_selftest() -> None:
     database_path.unlink(missing_ok=True)
 
     from app.database import init_db
-    from app.handlers.tickets.utils import can_user_return_ticket, extract_order_number
-    from app.keyboards.common import bottom_menu_for_role, main_menu_for_role
+    from app.handlers.tickets.utils import can_participant_cancel_ticket, can_user_return_ticket, extract_order_number
+    from app.keyboards.admin import admin_menu
+    from app.keyboards.common import bottom_menu_for_role, main_menu_for_role, ticket_work_menu_keyboard
     from app.keyboards.productivity import work_hub_keyboard
-    from app.keyboards.tickets import ticket_action_keyboard
+    from app.keyboards.tickets import post_create_options_keyboard, ticket_action_keyboard, ticket_notification_keyboard
     from app.services.analytics import collect_daily_stats, export_statistics_csv
     from app.services.backups import create_database_backup
     from app.services.feedback import create_feedback, get_feedback, list_feedback
     from app.services.polls import create_poll, get_poll_results, upsert_vote
     from app.services.preferences import get_message_style, set_message_style
+    from app.services.project_export import create_project_export
+    from app.services.ticket_messages import get_ticket_message_ids, send_live_ticket_text, set_ticket_message_ids
+    from app.services.ui_messages import get_ui_message_ids, send_ui_text, set_ui_message_ids
     from app.services.ui_metrics import (
         classify_callback_button,
         classify_reply_button,
@@ -169,6 +174,7 @@ async def run_selftest() -> None:
             "ticket_reads", "ticket_transfer_requests", "ticket_assignment_history",
             "day_off_releases", "response_templates", "ticket_metrics", "daily_stats",
             "feedback_messages", "polls", "poll_votes", "admin_notes", "ui_button_events",
+            "ticket_message_registry", "ui_message_registry",
         ):
             _assert(required_table in tables, f"Не создана таблица {required_table}")
         template_count = connection.execute(
@@ -460,6 +466,35 @@ async def run_selftest() -> None:
         "В закрытом тикете пропала кнопка возврата в работу",
     )
 
+    open_ticket = dict(await get_ticket_by_id(confirmation_ticket))
+    open_ticket["status"] = "in_work"
+    author_user = {"telegram_id": 2001, "role": "purchasing"}
+    colleague_user = {"telegram_id": 2002, "role": "purchasing"}
+    _assert(can_participant_cancel_ticket(open_ticket, author_user), "Автор не может закрыть тикет как неактуальный")
+    _assert(not can_participant_cancel_ticket(open_ticket, colleague_user), "Чужой сотрудник может закрыть тикет автора")
+    _assert(can_participant_cancel_ticket(open_ticket, colleague_user, True), "Администратор не может закрыть тикет")
+
+    notification_callbacks = [
+        button.callback_data
+        for row in ticket_notification_keyboard(open_ticket, author_user).inline_keyboard
+        for button in row
+        if getattr(button, "callback_data", None)
+    ]
+    _assert(
+        notification_callbacks[0] == f"ticket_cancel:{confirmation_ticket}",
+        "В уведомлении автора кнопка закрытия не вынесена наверх",
+    )
+    post_create_callbacks = [
+        button.callback_data
+        for row in post_create_options_keyboard(confirmation_ticket).inline_keyboard
+        for button in row
+        if getattr(button, "callback_data", None)
+    ]
+    _assert(
+        f"ticket_cancel:{confirmation_ticket}" in post_create_callbacks,
+        "В сообщении после создания нет быстрой кнопки закрытия",
+    )
+
     events = await get_ticket_events(delayed_ticket)
     event_types = {event["event_type"] for event in events}
     _assert({"created", "taken", "auto_close_scheduled", "comment", "auto_closed"} <= event_types, "История ключевых действий неполна")
@@ -522,6 +557,59 @@ async def run_selftest() -> None:
         "Снимок статуса заказа не сохранился в тикете",
     )
 
+    await set_ticket_message_ids(snapshot_ticket, 1001, [101, 102, 102])
+    _assert(
+        await get_ticket_message_ids(snapshot_ticket, 1001) == [101, 102],
+        "Реестр живых карточек тикета сохраняет сообщения неверно",
+    )
+
+    class _FakeSentMessage:
+        def __init__(self, message_id: int):
+            self.message_id = message_id
+
+    class _FakeBot:
+        def __init__(self):
+            self.sent: list[tuple[int, str]] = []
+            self.deleted: list[tuple[int, int]] = []
+            self.next_message_id = 500
+
+        async def send_message(self, *, chat_id: int, text: str, reply_markup=None):
+            self.sent.append((int(chat_id), str(text)))
+            self.next_message_id += 1
+            return _FakeSentMessage(self.next_message_id)
+
+        async def delete_message(self, *, chat_id: int, message_id: int):
+            self.deleted.append((int(chat_id), int(message_id)))
+
+    fake_bot = _FakeBot()
+    await send_live_ticket_text(
+        fake_bot,
+        chat_id=1001,
+        ticket_id=snapshot_ticket,
+        text=f"Обновлённая карточка тикета #{snapshot_ticket}",
+    )
+    _assert(fake_bot.deleted == [(1001, 101), (1001, 102)], "Старая карточка тикета не удалена")
+    _assert(
+        await get_ticket_message_ids(snapshot_ticket, 1001) == [501],
+        "Новая живая карточка тикета не стала актуальной",
+    )
+
+    await set_ui_message_ids(1001, "primary", [201, 202])
+    ui_bot = _FakeBot()
+    await send_ui_text(
+        ui_bot,
+        chat_id=1001,
+        text="Новый служебный экран",
+    )
+    _assert(
+        ui_bot.deleted == [(1001, 201), (1001, 202)],
+        "Предыдущий служебный экран не удаляется",
+    )
+    _assert(
+        await get_ui_message_ids(1001, "primary") == [501],
+        "Новый служебный экран не стал единственным актуальным",
+    )
+
     reply_menu_texts = {button.text for row in bottom_menu_for_role("client").keyboard for button in row}
     inline_callbacks = {
         button.callback_data
@@ -530,8 +618,28 @@ async def run_selftest() -> None:
         if getattr(button, "callback_data", None)
     }
     _assert("🔎 Узнать статус заказа" in reply_menu_texts, "В нижнем меню нет проверки заказа")
+    _assert("📂 Работа с тикетами" in reply_menu_texts, "В нижнем меню нет компактного раздела тикетов")
+    _assert("📤 Исходящие" not in reply_menu_texts, "Исходящие не спрятаны из главного меню")
     _assert("❓ Помощь" in reply_menu_texts, "В нижнем меню нет центра помощи")
     _assert("order_status_start" in inline_callbacks, "В inline-меню нет проверки заказа")
+    _assert("ticket_work_menu" in inline_callbacks, "В inline-меню нет раздела работы с тикетами")
+    work_callbacks = {
+        button.callback_data
+        for row in ticket_work_menu_keyboard().inline_keyboard
+        for button in row
+        if getattr(button, "callback_data", None)
+    }
+    _assert(
+        {"outgoing_tickets", "incoming_tickets", "work_tickets", "archive_tickets", "work_hub"} <= work_callbacks,
+        "Подменю работы с тикетами неполное",
+    )
+    admin_callbacks = {
+        button.callback_data
+        for row in admin_menu().inline_keyboard
+        for button in row
+        if getattr(button, "callback_data", None)
+    }
+    _assert("admin_templates" not in admin_callbacks, "Отключённые шаблоны остались в админке")
     _assert(html_escape("5 < 10 & 12 > 3") == "5 &lt; 10 &amp; 12 &gt; 3", "HTML не экранируется")
     _assert(format_moscow_datetime("2026-01-01 00:00:00").endswith("03:00 МСК"), "Неверное преобразование UTC в МСК")
 
@@ -548,6 +656,17 @@ async def run_selftest() -> None:
                 callback = getattr(button, "callback_data", None)
                 if callback:
                     _assert(len(callback.encode("utf-8")) <= 64, f"Слишком длинный callback_data: {callback}")
+
+    export_path, export_count, export_digest = create_project_export()
+    try:
+        _assert(export_count > 20 and len(export_digest) == 64, "Архив исходного кода не сформирован")
+        with zipfile.ZipFile(export_path) as source_archive:
+            export_names = set(source_archive.namelist())
+        _assert("app/database.py" in export_names and "main.py" in export_names, "В выгрузке нет исходного кода")
+        _assert("app/services/project_export.py" in export_names, "В выгрузке нет сервиса экспорта")
+        _assert("bot.db" not in export_names and not any(name.startswith("backups/") for name in export_names), "В выгрузку попали рабочие данные")
+    finally:
+        export_path.unlink(missing_ok=True)
 
     backup_path = await create_database_backup(keep_last=2)
     _assert(backup_path.is_file(), "Резервная копия не создана")

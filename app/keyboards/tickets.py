@@ -38,17 +38,65 @@ def attachments_keyboard() -> InlineKeyboardMarkup:
         ]
     )
 
-def open_ticket_keyboard(ticket_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+def open_ticket_keyboard(ticket_id: int, *, can_cancel: bool = False) -> InlineKeyboardMarkup:
+    rows = []
+    if can_cancel:
+        rows.append(
             [
                 InlineKeyboardButton(
-                    text="📂 Открыть тикет",
-                    callback_data=f"ticket_open:{ticket_id}"
+                    text="❌ Закрыть как неактуальный",
+                    callback_data=f"ticket_cancel:{ticket_id}",
                 )
             ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="📂 Открыть тикет",
+                callback_data=f"ticket_open:{ticket_id}"
+            )
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def ticket_notification_keyboard(ticket, user=None) -> InlineKeyboardMarkup:
+    user_id = int(row_get(user, "telegram_id", 0) or 0)
+    creator_id = int(row_get(ticket, "created_by", 0) or 0)
+    ticket_id = int(row_get(ticket, "id"))
+    status = str(row_get(ticket, "status", ""))
+    role = row_get(user, "role")
+
+    rows = []
+    if user_id == creator_id:
+        if status not in {"done", "cancelled"}:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="❌ Закрыть как неактуальный",
+                        callback_data=f"ticket_cancel:{ticket_id}",
+                    )
+                ]
+            )
+        elif department_by_role(role) == "client":
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="↩️ Вернуть в работу",
+                        callback_data=f"ticket_return:{ticket_id}",
+                    )
+                ]
+            )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="📂 Открыть тикет",
+                callback_data=f"ticket_open:{ticket_id}",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def delayed_close_keyboard(ticket_id: int) -> InlineKeyboardMarkup:
@@ -64,6 +112,12 @@ def delayed_close_keyboard(ticket_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="✅ Закрыть сейчас",
                     callback_data=f"ticket_close_now:{ticket_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Закрыть как неактуальный",
+                    callback_data=f"ticket_cancel:{ticket_id}",
                 )
             ],
             [
@@ -391,6 +445,16 @@ def ticket_action_keyboard(ticket, user=None, is_admin: bool = False) -> InlineK
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     if status in {"new", "in_work"}:
+        if is_creator:
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        text="❌ Закрыть как неактуальный",
+                        callback_data=f"ticket_cancel:{ticket_id}"
+                    )
+                ]
+            )
+
         if is_executor_department:
             keyboard.append(
                 [
@@ -429,7 +493,10 @@ def ticket_action_keyboard(ticket, user=None, is_admin: bool = False) -> InlineK
                 ]
             )
 
-        if user_department == requester_department:
+    elif status == "waiting_confirmation":
+        is_delayed_close = bool(row_get(ticket, "auto_close_at"))
+
+        if is_creator:
             keyboard.append(
                 [
                     InlineKeyboardButton(
@@ -438,9 +505,6 @@ def ticket_action_keyboard(ticket, user=None, is_admin: bool = False) -> InlineK
                     )
                 ]
             )
-
-    elif status == "waiting_confirmation":
-        is_delayed_close = bool(row_get(ticket, "auto_close_at"))
 
         if is_creator and is_delayed_close:
             keyboard.append(
@@ -491,16 +555,6 @@ def ticket_action_keyboard(ticket, user=None, is_admin: bool = False) -> InlineK
                     InlineKeyboardButton(
                         text="💬 Ответить",
                         callback_data=f"ticket_comment:{ticket_id}"
-                    )
-                ]
-            )
-
-        if user_department == requester_department:
-            keyboard.append(
-                [
-                    InlineKeyboardButton(
-                        text="❌ Закрыть как неактуальный",
-                        callback_data=f"ticket_cancel:{ticket_id}"
                     )
                 ]
             )
@@ -598,6 +652,7 @@ def post_create_options_keyboard(ticket_id: int, priority: str = "normal", categ
     rows = [[InlineKeyboardButton(text="При необходимости укажите срочность:", callback_data="noop")]]
     rows.append([InlineKeyboardButton(text=("✓ " if priority == value else "") + label, callback_data=f"ticket_priority:{ticket_id}:{value}") for value, label in priority_labels.items()])
     rows.append([InlineKeyboardButton(text=f"Тип тикета: {category_labels.get(category, 'не выбран')}", callback_data=f"ticket_category_menu:{ticket_id}")])
+    rows.append([InlineKeyboardButton(text="❌ Закрыть как неактуальный", callback_data=f"ticket_cancel:{ticket_id}")])
     rows.append([InlineKeyboardButton(text="📂 Открыть тикет", callback_data=f"ticket_open:{ticket_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -605,6 +660,7 @@ def ticket_category_keyboard(ticket_id: int, selected: str | None = None) -> Inl
     options = [("question", "❓ Вопрос"), ("task", "📝 Задача"), ("problem", "⚠️ Проблема"), ("documents", "📄 Документы") ]
     rows = [[InlineKeyboardButton(text=("✓ " if selected == value else "") + label, callback_data=f"ticket_category:{ticket_id}:{value}")] for value, label in options]
     rows.append([InlineKeyboardButton(text="Без типа", callback_data=f"ticket_category:{ticket_id}:none")])
+    rows.append([InlineKeyboardButton(text="❌ Закрыть как неактуальный", callback_data=f"ticket_cancel:{ticket_id}")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"ticket_options:{ticket_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

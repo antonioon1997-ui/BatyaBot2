@@ -23,6 +23,7 @@ from app.keyboards.feedback import admin_feedback_card_keyboard
 from app.presentation.faq import FAQ_GROUPS
 from app.services.feedback import create_feedback
 from app.services.preferences import get_message_style, set_message_style, user_text
+from app.services.ui_messages import send_ui_text
 from app.services.ui_versions import help_settings_enabled
 from app.services.users import get_user_by_telegram_id
 from app.states import HelpStates
@@ -57,6 +58,15 @@ async def _deny(target) -> None:
         await target.answer("Нет доступа.")
 
 
+async def _send_help_screen(target, text: str, reply_markup=None) -> None:
+    await send_ui_text(
+        target.bot,
+        chat_id=target.from_user.id,
+        text=text,
+        reply_markup=reply_markup,
+    )
+
+
 async def _send_help(target, state: FSMContext | None = None) -> None:
     user = await _get_active_user(target)
     if not user:
@@ -64,8 +74,8 @@ async def _send_help(target, state: FSMContext | None = None) -> None:
         return
     if state is not None:
         await state.clear()
-    message = target.message if isinstance(target, CallbackQuery) else target
-    await message.answer(
+    await _send_help_screen(
+        target,
         "❓ <b>Помощь</b>\n\n"
         "Здесь можно быстро найти инструкцию, посмотреть изменения или написать, что стоит сделать удобнее.",
         reply_markup=help_main_keyboard(),
@@ -89,7 +99,8 @@ async def help_faq_callback(call: CallbackQuery):
     if not await _get_active_user(call):
         await _deny(call)
         return
-    await call.message.answer(
+    await _send_help_screen(
+        call,
         "📖 <b>Как сделать...</b>\n\nВыберите, с чем связан вопрос.",
         reply_markup=faq_main_keyboard(),
     )
@@ -106,7 +117,8 @@ async def help_faq_group_callback(call: CallbackQuery):
         await call.answer("Раздел не найден.", show_alert=True)
         return
     title = "🎫 Работа с тикетами" if group == "tickets" else "📦 Работа с заказами"
-    await call.message.answer(
+    await _send_help_screen(
+        call,
         f"<b>{title}</b>\n\nВыберите вопрос.",
         reply_markup=faq_group_keyboard(group),
     )
@@ -128,7 +140,8 @@ async def help_faq_article_callback(call: CallbackQuery):
         await call.answer("Статья не найдена.", show_alert=True)
         return
     title, body = article
-    await call.message.answer(
+    await _send_help_screen(
+        call,
         f"<b>{html_escape(title)}</b>\n\n{html_escape(body)}",
         reply_markup=faq_article_keyboard(group),
     )
@@ -182,7 +195,8 @@ async def help_whats_new_callback(call: CallbackQuery):
     version, notes = _latest_update()
     notes = _notes_for_user(notes, user["role"], is_admin_user=int(call.from_user.id) == int(settings.admin_id))
     lines = "\n".join(f"• {html_escape(item)}" for item in notes) or "• Пользовательских изменений для вашей роли нет."
-    await call.message.answer(
+    await _send_help_screen(
+        call,
         "🆕 <b>Что нового</b>\n\n"
         f"Текущая версия: <b>{html_escape(version)}</b>\n\n"
         f"{lines}",
@@ -198,7 +212,8 @@ async def help_feedback_callback(call: CallbackQuery, state: FSMContext):
         return
     await state.clear()
     await state.set_state(HelpStates.waiting_feedback)
-    await call.message.answer(
+    await _send_help_screen(
+        call,
         "💬 <b>Есть идея?</b>\n\n"
         "Если появилась мысль, как сделать вашу работу проще или удобнее — напишите её одним сообщением.\n\n"
         "Сюда же можно отправить вопрос, сообщить об ошибке, пожаловаться на неудобную функцию "
@@ -215,7 +230,8 @@ async def help_question_callback(call: CallbackQuery, state: FSMContext):
         return
     await state.clear()
     await state.set_state(HelpStates.waiting_question)
-    await call.message.answer(
+    await _send_help_screen(
+        call,
         "❓ <b>Не нашли ответ?</b>\n\n"
         "Напишите вопрос своими словами. Он напрямую придёт администратору. "
         "Можно приложить скриншот, фото или документ.",
@@ -259,7 +275,8 @@ async def _save_user_message(message: Message, state: FSMContext, bot: Bot, sour
     text = (message.text or message.caption or "").strip()
     file_id, file_type, file_name = _message_attachment(message)
     if not text and not file_id:
-        await message.answer(
+        await _send_help_screen(
+            message,
             "Отправьте текст, фото, видео, голосовое сообщение или документ.",
             reply_markup=help_input_cancel_keyboard(),
         )
@@ -305,7 +322,11 @@ async def _save_user_message(message: Message, state: FSMContext, bot: Bot, sour
 
     await state.clear()
     key = "question_saved" if source == "question" else "feedback_saved"
-    await message.answer(await user_text(message.from_user.id, key), reply_markup=help_main_keyboard())
+    await _send_help_screen(
+        message,
+        await user_text(message.from_user.id, key),
+        reply_markup=help_main_keyboard(),
+    )
 
 
 @router.message(HelpStates.waiting_feedback)
@@ -326,7 +347,8 @@ async def help_settings_callback(call: CallbackQuery):
     if not help_settings_enabled():
         await call.answer("Настройки скрыты в выбранной версии интерфейса.", show_alert=True)
         return
-    await call.message.answer(
+    await _send_help_screen(
+        call,
         "⚙️ <b>Настройки</b>\n\n"
         "Пока здесь можно изменить только стиль коротких системных сообщений.",
         reply_markup=help_settings_keyboard(),
@@ -343,7 +365,8 @@ async def help_message_style_callback(call: CallbackQuery):
         await call.answer("Настройки скрыты в выбранной версии интерфейса.", show_alert=True)
         return
     style = await get_message_style(call.from_user.id)
-    await call.message.answer(
+    await _send_help_screen(
+        call,
         "💬 <b>Стиль сообщений</b>\n\n"
         "Меняет короткие системные фразы и сообщения о пустых списках. "
         "Рабочие данные, статусы и логика бота остаются одинаковыми.\n\n"
@@ -362,7 +385,8 @@ async def help_style_callback(call: CallbackQuery):
     style = call.data.split(":", 1)[1]
     selected = await set_message_style(call.from_user.id, style)
     key = "style_saved_friendly" if selected == "friendly" else "style_saved_strict"
-    await call.message.answer(
+    await _send_help_screen(
+        call,
         await user_text(call.from_user.id, key),
         reply_markup=message_style_keyboard(selected),
     )

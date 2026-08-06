@@ -5,6 +5,7 @@ from aiogram.types import Message
 from app.config import settings
 from app.keyboards.common import access_request_keyboard, bottom_menu_for_role, main_menu_for_role
 from app.services.preferences import user_text
+from app.services.ui_messages import UiMessagePart, send_ui_parts
 from app.services.users import create_or_update_access_request, get_user_by_telegram_id
 from app.utils import html_escape
 
@@ -25,14 +26,19 @@ async def cmd_start(message: Message, bot: Bot):
     if user and user["is_active"] == 1:
         role = user["role"]
 
-        await message.answer(
-            await user_text(telegram_id, "access_confirmed"),
-            reply_markup=bottom_menu_for_role(role, is_admin=is_admin)
-        )
-
-        await message.answer(
-            await user_text(telegram_id, "main_menu_title"),
-            reply_markup=main_menu_for_role(role, is_admin=is_admin)
+        await send_ui_parts(
+            message.bot,
+            chat_id=telegram_id,
+            parts=[
+                UiMessagePart(
+                    await user_text(telegram_id, "access_confirmed"),
+                    bottom_menu_for_role(role, is_admin=is_admin),
+                ),
+                UiMessagePart(
+                    await user_text(telegram_id, "main_menu_title"),
+                    main_menu_for_role(role, is_admin=is_admin),
+                ),
+            ],
         )
         return
 

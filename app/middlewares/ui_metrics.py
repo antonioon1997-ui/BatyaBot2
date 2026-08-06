@@ -36,17 +36,25 @@ class UiMetricsMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
+        info = None
+        source = None
+        user = getattr(event, "from_user", None)
+
         try:
-            info = None
-            source = None
-            user = getattr(event, "from_user", None)
             if isinstance(event, Message):
+                # Сообщения, созданные нажатием ReplyKeyboard, больше не удаляем.
+                # На части клиентов Telegram удаление такого сообщения может свернуть
+                # нижнюю клавиатуру, несмотря на is_persistent=True. Метрика при этом
+                # по-прежнему записывается по стабильному техническому идентификатору.
                 info = classify_reply_button(event.text)
                 source = "reply"
             elif isinstance(event, CallbackQuery):
                 info = classify_callback_button(event.data, _clicked_button_text(event))
                 source = "inline"
+        except Exception:
+            logger.exception("Не удалось распознать элемент интерфейса для метрики")
 
+        try:
             if info and source and user:
                 button_id, button_text, scope = info
                 await record_ui_event(

@@ -1,7 +1,7 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
 from app.domain import department_by_role, is_observer_role, normalize_role
-from app.services.ui_versions import help_button_enabled
+from app.services.ui_versions import compact_main_menu_enabled, help_button_enabled
 
 def row_get(row, key, default=None):
     if row is None:
@@ -49,31 +49,30 @@ def bottom_menu_for_role(role: str | None = None, is_admin: bool = False) -> Rep
         return ReplyKeyboardMarkup(
             keyboard=keyboard,
             resize_keyboard=True,
+            is_persistent=True,
+            one_time_keyboard=False,
             input_field_placeholder="Выбери действие..."
         )
 
-    keyboard = [
-        [
-            KeyboardButton(text="➕ Создать тикет"),
-        ],
-        [
-            KeyboardButton(text="🔎 Узнать статус заказа"),
-        ],
-        [
-            KeyboardButton(text="📤 Исходящие"),
-            KeyboardButton(text="📥 Входящие"),
-        ],
-        [
-            KeyboardButton(text="🛠 В работе"),
-            KeyboardButton(text="📦 Архив"),
-        ],
-        [
-            KeyboardButton(text="📌 Моя работа"),
-        ],
-    ]
-
-    if help_button_enabled():
-        keyboard.append([KeyboardButton(text="❓ Помощь")])
+    if compact_main_menu_enabled():
+        keyboard = [
+            [KeyboardButton(text="➕ Создать тикет")],
+            [KeyboardButton(text="🔎 Узнать статус заказа")],
+        ]
+        navigation_row = [KeyboardButton(text="📂 Работа с тикетами")]
+        if help_button_enabled():
+            navigation_row.append(KeyboardButton(text="❓ Помощь"))
+        keyboard.append(navigation_row)
+    else:
+        keyboard = [
+            [KeyboardButton(text="➕ Создать тикет")],
+            [KeyboardButton(text="🔎 Узнать статус заказа")],
+            [KeyboardButton(text="📤 Исходящие"), KeyboardButton(text="📥 Входящие")],
+            [KeyboardButton(text="🛠 В работе"), KeyboardButton(text="📦 Архив")],
+            [KeyboardButton(text="📌 Моя работа")],
+        ]
+        if help_button_enabled():
+            keyboard.append([KeyboardButton(text="❓ Помощь")])
 
     if is_admin:
         keyboard.append(
@@ -85,6 +84,8 @@ def bottom_menu_for_role(role: str | None = None, is_admin: bool = False) -> Rep
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
         resize_keyboard=True,
+        is_persistent=True,
+        one_time_keyboard=False,
         input_field_placeholder="Выбери действие..."
     )
 
@@ -144,56 +145,31 @@ def main_menu_for_role(role: str | None = None, is_admin: bool = False) -> Inlin
             rows.append([InlineKeyboardButton(text="❓ Помощь", callback_data="help_main")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                text="➕ Создать тикет",
-                callback_data="create_ticket"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="🔎 Узнать статус заказа",
-                callback_data="order_status_start"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="📤 Исходящие",
-                callback_data="outgoing_tickets"
-            ),
-            InlineKeyboardButton(
-                text="📥 Входящие",
-                callback_data="incoming_tickets"
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text="🛠 В работе",
-                callback_data="work_tickets"
-            ),
-            InlineKeyboardButton(
-                text="📦 Архив",
-                callback_data="archive_tickets"
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text="📌 Моя работа",
-                callback_data="work_hub"
-            ),
-        ],
-    ]
-
-    if help_button_enabled():
-        keyboard.append(
+    if compact_main_menu_enabled():
+        keyboard = [
+            [InlineKeyboardButton(text="➕ Создать тикет", callback_data="create_ticket")],
+            [InlineKeyboardButton(text="🔎 Узнать статус заказа", callback_data="order_status_start")],
+        ]
+        navigation_row = [InlineKeyboardButton(text="📂 Работа с тикетами", callback_data="ticket_work_menu")]
+        if help_button_enabled():
+            navigation_row.append(InlineKeyboardButton(text="❓ Помощь", callback_data="help_main"))
+        keyboard.append(navigation_row)
+    else:
+        keyboard = [
+            [InlineKeyboardButton(text="➕ Создать тикет", callback_data="create_ticket")],
+            [InlineKeyboardButton(text="🔎 Узнать статус заказа", callback_data="order_status_start")],
             [
-                InlineKeyboardButton(
-                    text="❓ Помощь",
-                    callback_data="help_main"
-                )
-            ]
-        )
+                InlineKeyboardButton(text="📤 Исходящие", callback_data="outgoing_tickets"),
+                InlineKeyboardButton(text="📥 Входящие", callback_data="incoming_tickets"),
+            ],
+            [
+                InlineKeyboardButton(text="🛠 В работе", callback_data="work_tickets"),
+                InlineKeyboardButton(text="📦 Архив", callback_data="archive_tickets"),
+            ],
+            [InlineKeyboardButton(text="📌 Моя работа", callback_data="work_hub")],
+        ]
+        if help_button_enabled():
+            keyboard.append([InlineKeyboardButton(text="❓ Помощь", callback_data="help_main")])
 
     if is_admin:
         keyboard.append(
@@ -206,6 +182,23 @@ def main_menu_for_role(role: str | None = None, is_admin: bool = False) -> Inlin
         )
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def ticket_work_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📤 Исходящие", callback_data="outgoing_tickets"),
+                InlineKeyboardButton(text="📥 Входящие", callback_data="incoming_tickets"),
+            ],
+            [
+                InlineKeyboardButton(text="🛠 В работе", callback_data="work_tickets"),
+                InlineKeyboardButton(text="📦 Архив", callback_data="archive_tickets"),
+            ],
+            [InlineKeyboardButton(text="📌 Моя работа", callback_data="work_hub")],
+            [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")],
+        ]
+    )
+
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return main_menu_for_role()

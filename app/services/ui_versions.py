@@ -10,7 +10,7 @@ ACTIVE_INTERFACE_FILE = INTERFACE_VERSIONS_DIR / "active.json"
 KEEP_INTERFACE_VERSIONS = 5
 
 LEGACY_UI_ID = "ui_2_2_classic"
-CURRENT_UI_ID = "ui_2_3_help_center"
+CURRENT_UI_ID = "ui_2_5_compact_tickets"
 
 BUILTIN_PROFILES: tuple[dict, ...] = (
     {
@@ -23,18 +23,33 @@ BUILTIN_PROFILES: tuple[dict, ...] = (
             "show_help_button": False,
             "show_help_settings": False,
             "allow_friendly_style": False,
+            "compact_main_menu": False,
         },
     },
     {
-        "id": CURRENT_UI_ID,
+        "id": "ui_2_3_help_center",
         "title": "Центр помощи 2.3",
         "app_version": "2.3",
         "created_at": "2026-07-30T16:30:00+03:00",
-        "description": "Помощь, FAQ, свободные сообщения команде разработки и выбор стиля системных фраз.",
+        "description": "Помощь, FAQ, свободные сообщения и выбор стиля системных фраз. Старое большое главное меню.",
         "config": {
             "show_help_button": True,
             "show_help_settings": True,
             "allow_friendly_style": True,
+            "compact_main_menu": False,
+        },
+    },
+    {
+        "id": CURRENT_UI_ID,
+        "title": "Компактное меню 2.5",
+        "app_version": "2.5",
+        "created_at": "2026-08-01T19:30:00+03:00",
+        "description": "Главное меню из трёх рядов и отдельный раздел «Работа с тикетами».",
+        "config": {
+            "show_help_button": True,
+            "show_help_settings": True,
+            "allow_friendly_style": True,
+            "compact_main_menu": True,
         },
     },
 )
@@ -43,6 +58,7 @@ DEFAULT_CONFIG = {
     "show_help_button": True,
     "show_help_settings": True,
     "allow_friendly_style": True,
+    "compact_main_menu": True,
 }
 
 
@@ -62,11 +78,17 @@ def _profile_path(version_id: str) -> Path:
 
 def ensure_ui_versions() -> None:
     INTERFACE_VERSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    current_profile_was_missing = not _profile_path(CURRENT_UI_ID).exists()
 
     for profile in BUILTIN_PROFILES:
         path = _profile_path(profile["id"])
         if not path.exists():
             _atomic_json(path, profile)
+
+    if current_profile_was_missing and ACTIVE_INTERFACE_FILE.exists():
+        previous_active = get_active_ui_id(ensure=False)
+        if previous_active == "ui_2_3_help_center":
+            _atomic_json(ACTIVE_INTERFACE_FILE, {"active_id": CURRENT_UI_ID})
 
     profiles = list_ui_versions(ensure=False)
     active_before_cleanup = get_active_ui_id(ensure=False)
@@ -176,3 +198,7 @@ def help_settings_enabled() -> bool:
 
 def friendly_style_enabled() -> bool:
     return bool(get_active_ui_config().get("allow_friendly_style", True))
+
+
+def compact_main_menu_enabled() -> bool:
+    return bool(get_active_ui_config().get("compact_main_menu", True))

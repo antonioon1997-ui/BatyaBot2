@@ -31,6 +31,7 @@ from .common import (
     normalize_role,
     row_get,
     ticket_open_button_text,
+    ticket_work_menu_keyboard,
 )
 from .observer import (
     observer_stats_menu_keyboard,
@@ -53,6 +54,7 @@ from .tickets import (
     ticket_action_keyboard,
     ticket_category_keyboard,
     ticket_filters_keyboard,
+    ticket_notification_keyboard,
     tickets_list_keyboard,
 )
 

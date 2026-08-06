@@ -31,6 +31,14 @@ READY_FILE = RUNTIME_DIR / "ready.json"
 UPDATE_HISTORY_FILE = RUNTIME_DIR / "update_history.json"
 VERSION_FILE = PROJECT_ROOT / "VERSION"
 
+# Одноразовый технический hotfix 2.5: штатный внешний обновлятор всегда повышает
+# номер версии. Для этого исправления бот подтверждает запуск как 2.6, после чего
+# возвращает отображаемую/рабочую версию 2.5 и запоминает, что операция выполнена.
+HOTFIX_ID = "ui_screen_dedup_2_5"
+HOTFIX_TARGET_VERSION = "2.5"
+HOTFIX_INSTALLER_VERSION = "2.6"
+HOTFIX_STATE_FILE = RUNTIME_DIR / f"hotfix_{HOTFIX_ID}.json"
+
 MAX_ARCHIVE_SIZE = 30 * 1024 * 1024
 MAX_UNCOMPRESSED_SIZE = 80 * 1024 * 1024
 MAX_FILES = 500
@@ -341,16 +349,65 @@ async def start_external_updater() -> tuple[bool, str]:
     return True, "Обновлятор запущен"
 
 
+def _read_hotfix_state() -> dict:
+    try:
+        payload = json.loads(HOTFIX_STATE_FILE.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _write_hotfix_state(payload: dict) -> None:
+    ensure_update_directories()
+    tmp = HOTFIX_STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, HOTFIX_STATE_FILE)
+
+
+def _version_preserving_hotfix_requested() -> bool:
+    try:
+        job = json.loads(JOB_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return False
+    notes = job.get("release_notes", []) if isinstance(job, dict) else []
+    return any(
+        "Номер версии сохраняется 2.5" in str(note)
+        for note in notes
+    )
+
+
+def _preserve_hotfix_version(started_version: str) -> None:
+    if (
+        started_version != HOTFIX_INSTALLER_VERSION
+        or not _version_preserving_hotfix_requested()
+    ):
+        return
+
+    _write_hotfix_state({
+        "id": HOTFIX_ID,
+        "installer_version": started_version,
+        "target_version": HOTFIX_TARGET_VERSION,
+        "completed": False,
+        "created_at": moscow_now_iso(timespec="seconds"),
+    })
+    VERSION_FILE.write_text(HOTFIX_TARGET_VERSION + "\n", encoding="utf-8")
+
+
 def mark_runtime_ready() -> None:
     ensure_update_directories()
+    started_version = get_current_version()
     payload = {
         "ready_at": moscow_now_iso(timespec="seconds"),
         "pid": os.getpid(),
-        "version": get_current_version(),
+        "version": started_version,
     }
     tmp = READY_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, READY_FILE)
+
+    # READY_FILE уже содержит 2.6, поэтому внешний обновлятор подтвердит успешный
+    # запуск. После этого оставляем пользовательскую версию на 2.5.
+    _preserve_hotfix_version(started_version)
 
 
 async def _send_update_message_with_retry(
@@ -466,6 +523,18 @@ async def deployment_result_watcher(bot) -> None:
         try:
             payload = json.loads(RESULT_FILE.read_text(encoding="utf-8"))
             status = payload.get("status")
+
+            hotfix_state = _read_hotfix_state()
+            if (
+                status == "success"
+                and not hotfix_state.get("completed")
+                and str(payload.get("version")) == str(hotfix_state.get("installer_version"))
+                and hotfix_state.get("target_version")
+            ):
+                payload["version"] = str(hotfix_state["target_version"])
+                payload["version_preserved"] = True
+                _rewrite_result_payload(payload)
+
             version = payload.get("version", get_current_version())
             notes = [str(item).strip() for item in payload.get("release_notes", []) if str(item).strip()]
 
@@ -614,6 +683,11 @@ async def deployment_result_watcher(bot) -> None:
                     await _send_update_message_with_retry(bot, admin_id, warning_text, attempts=3)
                 payload["failed_users_reported"] = True
                 _rewrite_result_payload(payload)
+
+            if status == "success" and hotfix_state and not hotfix_state.get("completed"):
+                hotfix_state["completed"] = True
+                hotfix_state["completed_at"] = moscow_now_iso(timespec="seconds")
+                _write_hotfix_state(hotfix_state)
 
             RESULT_FILE.unlink(missing_ok=True)
         except Exception:
