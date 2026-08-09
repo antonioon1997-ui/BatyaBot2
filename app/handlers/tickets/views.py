@@ -3,7 +3,6 @@ import logging
 from aiogram.types import CallbackQuery
 
 from app.keyboards.common import (
-    bottom_menu_for_role,
     department_by_role,
     is_observer_role,
     main_menu_for_role,
@@ -21,8 +20,8 @@ from app.keyboards.tickets import (
 )
 from app.services.attachments import get_ticket_attachments
 from app.services.preferences import user_text
-from app.services.ticket_messages import delete_message_ids, replace_ticket_message_bundle
-from app.services.ui_messages import UiMessagePart, send_ui_parts, send_ui_text
+from app.services.ticket_messages import delete_message_ids, replace_ticket_message_bundle, send_live_ticket_text
+from app.services.ui_messages import send_ui_text
 from app.services.work_management import mark_ticket_read
 from app.services.tickets import (
     get_archive_incoming_tickets,
@@ -57,25 +56,14 @@ async def show_main_menu(message_or_call, user=None, admin_flag: bool = False):
 
     telegram_id = int(message_or_call.from_user.id)
     action_prompt = await user_text(telegram_id, "main_menu_title")
-    await send_ui_parts(
+    await send_ui_text(
         message_or_call.bot,
         chat_id=telegram_id,
-        parts=[
-            UiMessagePart(
-                "Главное меню.",
-                bottom_menu_for_role(
-                    role=row_get(user, "role"),
-                    is_admin=admin_flag,
-                ),
-            ),
-            UiMessagePart(
-                action_prompt,
-                main_menu_for_role(
-                    role=row_get(user, "role"),
-                    is_admin=admin_flag,
-                ),
-            ),
-        ],
+        text=f"🏠 <b>Главное меню</b>\n\n{action_prompt}",
+        reply_markup=main_menu_for_role(
+            role=row_get(user, "role"),
+            is_admin=admin_flag,
+        ),
     )
     if isinstance(message_or_call, CallbackQuery):
         await message_or_call.answer()
@@ -132,19 +120,19 @@ def _ticket_media_caption(ticket, comments, attachment_count: int) -> str:
     return "\n".join(lines)
 
 
-async def send_ticket_attachments(
-    message_or_call,
+async def _send_ticket_attachments_to_chat(
+    bot,
+    chat_id: int,
     ticket_id: int,
     attachments,
     *,
     primary_caption: str,
     primary_markup=None,
 ) -> list[int]:
+    """Отправляет вложения как часть живой карточки тикета в конкретный чат."""
     if not attachments:
         return []
 
-    chat_id = int(message_or_call.from_user.id)
-    bot = message_or_call.bot
     sent_ids: list[int] = []
 
     for index, attachment in enumerate(attachments):
@@ -157,11 +145,11 @@ async def send_ticket_attachments(
         markup = primary_markup if index == 0 else None
         try:
             if file_type == "photo":
-                message = await bot.send_photo(chat_id=chat_id, photo=file_id, caption=caption, reply_markup=markup)
+                message = await bot.send_photo(chat_id=int(chat_id), photo=file_id, caption=caption, reply_markup=markup)
             elif file_type == "document":
-                message = await bot.send_document(chat_id=chat_id, document=file_id, caption=caption, reply_markup=markup)
+                message = await bot.send_document(chat_id=int(chat_id), document=file_id, caption=caption, reply_markup=markup)
             elif file_type == "video":
-                message = await bot.send_video(chat_id=chat_id, video=file_id, caption=caption, reply_markup=markup)
+                message = await bot.send_video(chat_id=int(chat_id), video=file_id, caption=caption, reply_markup=markup)
             else:
                 continue
             sent_ids.append(int(message.message_id))
@@ -172,41 +160,50 @@ async def send_ticket_attachments(
 
     return sent_ids
 
-async def send_ticket_card(message_or_call, ticket, user=None, admin_flag: bool = False):
-    if not ticket:
-        if isinstance(message_or_call, CallbackQuery):
-            await message_or_call.answer("Тикет не найден.", show_alert=True)
-        else:
-            await message_or_call.answer("Тикет не найден.")
-        return
 
-    if user is None:
-        telegram_id = message_or_call.from_user.id
-        user, admin_flag = await get_current_user_and_admin(telegram_id)
+async def send_ticket_attachments(
+    message_or_call,
+    ticket_id: int,
+    attachments,
+    *,
+    primary_caption: str,
+    primary_markup=None,
+) -> list[int]:
+    return await _send_ticket_attachments_to_chat(
+        message_or_call.bot,
+        int(message_or_call.from_user.id),
+        ticket_id,
+        attachments,
+        primary_caption=primary_caption,
+        primary_markup=primary_markup,
+    )
 
-    comments = await get_ticket_comments(int(ticket["id"]), limit=20)
+async def _build_ticket_card_payload(ticket, user, admin_flag: bool = False):
+    """Собирает полную текстовую карточку тикета без отправки в Telegram.
+
+    Карточка используется и при обычном открытии тикета, и в уведомлении о
+    выполнении. Благодаря этому уведомление о завершении всегда содержит ту же
+    историю ответов, которую пользователь увидел бы после ручного открытия.
+    """
+    comments = await get_ticket_comments(int(ticket["id"]), limit=None)
     attachments = await get_ticket_attachments(int(ticket["id"]))
 
     comments_text = ""
-
     if comments:
         comments_lines = []
-
         for comment in comments:
             author_name = (
                 row_get(comment, "author_name")
                 or row_get(comment, "author_username")
                 or row_get(comment, "author_telegram_id")
             )
-
             comments_lines.append(
-                f"— {html_escape(author_name)} [{format_moscow_datetime(row_get(comment, 'created_at'))}]:\n{html_escape(row_get(comment, 'text'))}"
+                f"— {html_escape(author_name)} [{format_moscow_datetime(row_get(comment, 'created_at'))}]:\n"
+                f"{html_escape(row_get(comment, 'text'))}"
             )
-
         comments_text = "\n\n💬 Комментарии:\n" + "\n\n".join(comments_lines)
 
     attachments_text = ""
-
     if attachments:
         attachments_text = f"\n\n📎 Вложения: {len(attachments)} шт."
 
@@ -229,8 +226,6 @@ async def send_ticket_card(message_or_call, ticket, user=None, admin_flag: bool 
         "documents": "Документы",
     }
 
-    # Обычный приоритет является значением по умолчанию и не перегружает карточку.
-    # Строка появляется только для явно значимых приоритетов.
     priority_line = optional_line(
         "🚦 Приоритет: ",
         priority_names.get(row_get(ticket, "priority")),
@@ -248,11 +243,13 @@ async def send_ticket_card(message_or_call, ticket, user=None, admin_flag: bool 
         if assignee_name
         else "👥 Исполнитель: общий тикет отдела\n"
     )
+
     summary_text = ""
     if has_text_value(row_get(ticket, "current_summary")):
         summary_text += f"\n\n📍 <b>Текущий итог:</b>\n{html_escape(row_get(ticket, 'current_summary'))}"
     if has_text_value(row_get(ticket, "next_action")):
         summary_text += f"\n\n➡️ <b>Следующее действие:</b>\n{html_escape(row_get(ticket, 'next_action'))}"
+
     snooze_line = (
         f"⏰ Отложен до: {format_moscow_datetime(row_get(ticket, 'snoozed_until'))}\n"
         if has_text_value(row_get(ticket, "snoozed_until"))
@@ -284,17 +281,31 @@ async def send_ticket_card(message_or_call, ticket, user=None, admin_flag: bool 
         events = await get_ticket_events(int(ticket["id"]), limit=100)
         if events:
             event_names = {
-                "created": "Тикет создан", "taken": "Взят в работу",
-                "comment": "Добавлен комментарий", "status_changed": "Изменён статус",
-                "priority_changed": "Изменён приоритет", "category_changed": "Изменён тип",
+                "created": "Тикет создан",
+                "taken": "Взят в работу",
+                "comment": "Добавлен комментарий",
+                "status_changed": "Изменён статус",
+                "priority_changed": "Изменён приоритет",
+                "category_changed": "Изменён тип",
             }
             lines = []
             for event in events:
-                actor = html_escape(row_get(event, "actor_name") or row_get(event, "actor_username") or row_get(event, "actor_telegram_id") or "Система")
-                label = event_names.get(row_get(event, "event_type"), html_escape(row_get(event, "event_type")))
+                actor = html_escape(
+                    row_get(event, "actor_name")
+                    or row_get(event, "actor_username")
+                    or row_get(event, "actor_telegram_id")
+                    or "Система"
+                )
+                label = event_names.get(
+                    row_get(event, "event_type"),
+                    html_escape(row_get(event, "event_type")),
+                )
                 details = row_get(event, "details")
                 detail_part = f" — {html_escape(details)}" if has_text_value(details) else ""
-                lines.append(f"— {format_moscow_datetime(row_get(event, 'created_at'))}: {label} ({actor}){detail_part}")
+                lines.append(
+                    f"— {format_moscow_datetime(row_get(event, 'created_at'))}: "
+                    f"{label} ({actor}){detail_part}"
+                )
             history_text = "\n\n🕓 История действий:\n" + "\n".join(lines)
 
     text = (
@@ -321,18 +332,112 @@ async def send_ticket_card(message_or_call, ticket, user=None, admin_flag: bool 
         user=user,
         is_admin=admin_flag,
     )
+    return text, comments, attachments, keyboard
 
-    chat_id = int(message_or_call.from_user.id)
-    bot = message_or_call.bot
+
+async def send_completed_ticket_card_to_creator(bot, ticket, headline: str) -> None:
+    """Отправляет автору компактное уведомление о выполнении тикета.
+
+    В рабочем уведомлении оставляем только то, что нужно менеджеру для быстрого
+    понимания результата: номер тикета, заказ BS (если есть), исходное описание
+    и всю переписку. Служебные поля карточки и история действий доступны при
+    обычном открытии тикета, но не перегружают уведомление о завершении.
+    """
+    creator_id = int(row_get(ticket, "created_by", 0) or 0)
+    if not creator_id:
+        return
+
+    try:
+        creator, admin_flag = await get_current_user_and_admin(creator_id)
+        ticket_id = int(row_get(ticket, "id"))
+        comments = await get_ticket_comments(ticket_id, limit=None)
+
+        status = row_get(ticket, "status")
+        if status == "done":
+            title = f"✅ Тикет #{ticket_id}: выполнен и закрыт"
+        else:
+            title = f"✅ Тикет #{ticket_id}: помечен выполненным"
+
+        lines = [title]
+
+        order_number = row_get(ticket, "order_number")
+        if has_text_value(order_number):
+            lines.extend(["", f"🔢 № Заказа BS: {html_escape(order_number)}"])
+
+        lines.extend(["", "📝 Описание:", html_escape(row_get(ticket, "description"))])
+
+        lines.extend(["", "💬 Комментарии:"])
+        if comments:
+            comment_blocks = []
+            for comment in comments:
+                author_name = (
+                    row_get(comment, "author_name")
+                    or row_get(comment, "author_username")
+                    or row_get(comment, "author_telegram_id")
+                    or "Пользователь"
+                )
+                comment_blocks.append(
+                    f"— {html_escape(author_name)}:\n{html_escape(row_get(comment, 'text'))}"
+                )
+            lines.append("\n\n".join(comment_blocks))
+        else:
+            lines.append("— нет")
+
+        keyboard = ticket_action_keyboard(
+            ticket=ticket,
+            user=creator,
+            is_admin=admin_flag,
+        )
+
+        await send_live_ticket_text(
+            bot,
+            chat_id=creator_id,
+            ticket_id=ticket_id,
+            text="\n".join(lines),
+            reply_markup=keyboard,
+        )
+    except Exception:
+        logger.exception(
+            "Не удалось отправить компактную карточку завершённого тикета %s автору %s",
+            row_get(ticket, "id"),
+            creator_id,
+        )
+
+
+async def send_ticket_card_to_user(
+    bot,
+    *,
+    ticket,
+    user,
+    admin_flag: bool = False,
+    mark_read: bool = False,
+) -> list[int]:
+    """Отправляет пользователю ту же живую карточку, что и при ручном открытии тикета.
+
+    Используется в том числе для первого уведомления о новом входящем тикете,
+    чтобы фото/документ/видео сразу были частью карточки, а не отдельной строкой
+    «Есть вложения». Автоматическая доставка не помечает тикет прочитанным.
+    """
+    if not ticket or not user:
+        return []
+
+    chat_id = int(row_get(user, "telegram_id"))
+    text, comments, attachments, keyboard = await _build_ticket_card_payload(
+        ticket,
+        user,
+        admin_flag,
+    )
+
     sent_ids: list[int] = []
     try:
         if attachments:
             media_caption = text if len(text) <= 900 else _ticket_media_caption(ticket, comments, len(attachments))
             sent_ids.extend(
-                await send_ticket_attachments(
-                    message_or_call=message_or_call,
-                    ticket_id=int(ticket["id"]),
-                    attachments=attachments,
+                await _send_ticket_attachments_to_chat(
+                    bot,
+                    chat_id,
+                    int(ticket["id"]),
+                    attachments,
                     primary_caption=media_caption,
                     primary_markup=keyboard,
                 )
@@ -353,17 +458,44 @@ async def send_ticket_card(message_or_call, ticket, user=None, admin_flag: bool 
         )
     except Exception:
         await delete_message_ids(bot, chat_id, sent_ids)
+        raise
+
+    if mark_read:
+        try:
+            await mark_ticket_read(int(ticket["id"]), chat_id)
+        except Exception:
+            logger.exception("Не удалось отметить тикет %s прочитанным", ticket["id"])
+
+    return sent_ids
+
+
+async def send_ticket_card(message_or_call, ticket, user=None, admin_flag: bool = False):
+    if not ticket:
+        if isinstance(message_or_call, CallbackQuery):
+            await message_or_call.answer("Тикет не найден.", show_alert=True)
+        else:
+            await message_or_call.answer("Тикет не найден.")
+        return
+
+    if user is None:
+        telegram_id = message_or_call.from_user.id
+        user, admin_flag = await get_current_user_and_admin(telegram_id)
+
+    try:
+        await send_ticket_card_to_user(
+            message_or_call.bot,
+            ticket=ticket,
+            user=user,
+            admin_flag=admin_flag,
+            mark_read=True,
+        )
+    except Exception:
         logger.exception("Не удалось показать карточку тикета %s", ticket["id"])
         if isinstance(message_or_call, CallbackQuery):
             await message_or_call.answer("Не удалось открыть тикет. Попробуйте ещё раз.", show_alert=True)
         else:
             await message_or_call.answer("Не удалось открыть тикет. Попробуйте ещё раз.")
         return
-
-    try:
-        await mark_ticket_read(int(ticket["id"]), chat_id)
-    except Exception:
-        logger.exception("Не удалось отметить тикет %s прочитанным", ticket["id"])
 
     if isinstance(message_or_call, CallbackQuery):
         await message_or_call.answer()

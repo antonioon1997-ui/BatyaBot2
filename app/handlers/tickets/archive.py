@@ -40,12 +40,13 @@ async def start_archive_search(message_or_call, state: FSMContext):
 
     text = (
         "🔎 <b>Поиск по архиву</b>\n\n"
-        "Отправь слово, фразу или номер заказа.\n\n"
+        "Отправь слово, фразу, номер тикета или номер заказа.\n\n"
         "Поиск выполняется только по завершённым и отменённым тикетам:\n"
+        "• по номеру тикета (например, <code>123</code> или <code>#123</code>);\n"
         "• по номеру заказа;\n"
         "• по описанию тикета;\n"
         "• по комментариям.\n\n"
-        "Например: <code>12345</code> или <code>не пришёл товар</code>."
+        "Например: <code>#123</code>, <code>12345</code> или <code>не пришёл товар</code>."
     )
 
     if isinstance(message_or_call, CallbackQuery):
@@ -149,7 +150,7 @@ async def callback_archive_search(call: CallbackQuery, state: FSMContext):
 @router.message(TicketActionStates.waiting_archive_search_query)
 async def process_archive_search_query(message: Message, state: FSMContext):
     if not message.text or not message.text.strip():
-        await message.answer("Отправь текст, слово или номер заказа для поиска.")
+        await message.answer("Отправь текст, номер тикета или номер заказа для поиска.")
         return
 
     query = message.text.strip()
