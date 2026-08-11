@@ -14,6 +14,7 @@ from app.keyboards.tickets import (
     ticket_category_keyboard,
 )
 from app.services.attachments import create_attachment
+from app.services.order_status import build_purchasing_snapshot, get_order_status
 from app.services.ticket_messages import replace_ticket_message_bundle
 from app.services.ui_messages import clear_ui_message_bundle, send_ui_text
 from app.services.tickets import (
@@ -98,6 +99,44 @@ def parse_ticket_text(text: str):
 
     return title[:250], description, order_number
 
+async def _load_order_snapshot_for_incoming_ticket(pending: dict) -> tuple[str | None, str]:
+    """Получает данные заказа для уведомления закупки, не блокируя создание при ошибке."""
+    order_number = str(pending.get("order_number") or "").strip()
+    if (
+        not order_number
+        or pending.get("requester_department") != DEPARTMENT_CLIENT
+        or pending.get("executor_department") != DEPARTMENT_PURCHASING
+    ):
+        return None, ""
+
+    try:
+        lookup = await get_order_status(order_number)
+    except Exception as exc:
+        logger.warning(
+            "Не удалось получить данные заказа %s при создании тикета: %s",
+            order_number,
+            exc,
+        )
+        return (
+            None,
+            "\n📦 <b>Данные по заказу:</b>\n"
+            "⚠️ Не удалось получить данные из базы OrderExporter. Тикет создан без снимка статуса.\n",
+        )
+
+    if lookup.record is None:
+        return (
+            None,
+            "\n📦 <b>Данные по заказу:</b>\n"
+            "Данные заказа не найдены в базе OrderExporter.\n",
+        )
+
+    snapshot = build_purchasing_snapshot(lookup.record, stale=lookup.stale)
+    return (
+        snapshot,
+        "\n📦 <b>Данные по заказу:</b>\n" + html_escape(snapshot) + "\n",
+    )
+
+
 def extract_message_attachment(message: Message):
     file_id = None
     file_type = None
@@ -125,6 +164,10 @@ def extract_message_attachment(message: Message):
     }
 
 async def _persist_pending_ticket(target, state: FSMContext, pending: dict):
+    order_status_snapshot, order_status_notification = (
+        await _load_order_snapshot_for_incoming_ticket(pending)
+    )
+
     ticket_id = await create_ticket(
         title=pending["title"],
         description=pending["description"],
@@ -132,6 +175,7 @@ async def _persist_pending_ticket(target, state: FSMContext, pending: dict):
         created_by=int(pending["created_by"]),
         executor_department=pending["executor_department"],
         requester_department=pending["requester_department"],
+        order_status_snapshot=order_status_snapshot,
     )
 
     attachment = pending.get("attachment")
@@ -177,6 +221,7 @@ async def _persist_pending_ticket(target, state: FSMContext, pending: dict):
         text=(
             f"🆕 Новый входящий тикет #{ticket_id}\n\n"
             f"{order_line}"
+            f"{order_status_notification}"
             f"{attachments_line}"
             f"👤 Автор: {html_escape(pending.get('author_name') or pending['created_by'])}\n"
             f"📝 Описание:\n{html_escape(pending['description'])}"
@@ -184,6 +229,7 @@ async def _persist_pending_ticket(target, state: FSMContext, pending: dict):
         exclude_telegram_id=int(pending["created_by"]),
         ticket_id=ticket_id,
         use_ticket_actions=True,
+        render_ticket_card=True,
     )
     return ticket_id
 

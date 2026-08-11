@@ -556,11 +556,10 @@ async def add_ticket_comment(
     finally:
         await db.close()
 
-async def get_ticket_comments(ticket_id: int, limit: int = 20):
+async def get_ticket_comments(ticket_id: int, limit: int | None = 20):
     db = await get_db()
 
-    cursor = await db.execute(
-        """
+    sql = """
         SELECT
             c.id,
             c.ticket_id,
@@ -573,10 +572,14 @@ async def get_ticket_comments(ticket_id: int, limit: int = 20):
         LEFT JOIN users u ON u.telegram_id = c.user_id
         WHERE c.ticket_id = ?
         ORDER BY c.created_at ASC
-        LIMIT ?
-        """,
-        (ticket_id, limit)
-    )
+    """
+    params: tuple = (ticket_id,)
+
+    if limit is not None:
+        sql += " LIMIT ?"
+        params = (ticket_id, int(limit))
+
+    cursor = await db.execute(sql, params)
 
     comments = await cursor.fetchall()
     await db.close()
@@ -1506,13 +1509,20 @@ async def search_archive_tickets(
     normalized_department = normalize_department(department)
     like_query = f"%{query}%"
 
+    # Если запрос похож на номер тикета (123 или #123), дополнительно ищем
+    # точное совпадение по tickets.id. При этом обычный поиск по заказу,
+    # описанию и комментариям продолжает работать с тем же запросом.
+    ticket_id_query = query[1:].strip() if query.startswith("#") else query
+    ticket_id = int(ticket_id_query) if ticket_id_query.isdigit() else None
+
     params = []
 
     where_sql = """
         WHERE t.is_deleted = 0
           AND t.status IN ('done', 'cancelled')
           AND (
-                COALESCE(t.order_number, '') LIKE ?
+                (? IS NOT NULL AND t.id = ?)
+                OR COALESCE(t.order_number, '') LIKE ?
                 OR COALESCE(t.description, '') LIKE ?
                 OR EXISTS (
                     SELECT 1
@@ -1525,6 +1535,8 @@ async def search_archive_tickets(
 
     params.extend(
         [
+            ticket_id,
+            ticket_id,
             like_query,
             like_query,
             like_query,
@@ -1545,6 +1557,10 @@ async def search_archive_tickets(
             ]
         )
 
+    # Параметры для ORDER BY идут после параметров WHERE и до LIMIT.
+    # Точное совпадение номера тикета поднимаем первым.
+    params.extend([ticket_id, ticket_id])
+
     limit_sql = ""
 
     if limit is not None:
@@ -1560,7 +1576,9 @@ async def search_archive_tickets(
         FROM tickets t
         LEFT JOIN users u ON u.telegram_id = t.created_by
         {where_sql}
-        ORDER BY COALESCE(t.closed_at, t.updated_at, t.created_at) DESC
+        ORDER BY
+            CASE WHEN ? IS NOT NULL AND t.id = ? THEN 0 ELSE 1 END,
+            COALESCE(t.closed_at, t.updated_at, t.created_at) DESC
         {limit_sql}
         """,
         tuple(params)

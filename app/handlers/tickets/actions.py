@@ -31,7 +31,7 @@ from .utils import (
     notify_ticket_creator,
     row_get,
 )
-from .views import send_ticket_card
+from .views import send_completed_ticket_card_to_creator, send_ticket_card
 
 router = Router()
 
@@ -144,6 +144,7 @@ async def _submit_comment_text(target, state: FSMContext, comment_text: str):
     comment_text = comment_text.strip()
     safe_comment = html_escape(comment_text)
     delayed_close_markup = None
+    completion_headline = None
 
     if close_after_comment and can_user_resolve_ticket(ticket, user):
         if is_client_to_purchasing_ticket(ticket):
@@ -166,6 +167,11 @@ async def _submit_comment_text(target, state: FSMContext, comment_text: str):
                 f"{safe_comment}\n\n"
                 "Тикет закрыт как выполненный. Если вопрос ещё актуален — верни его в работу."
             )
+            completion_headline = (
+                f"✅ Тикет #{ticket_id} выполнен и закрыт.\n"
+                "Ниже — полная карточка тикета со всей перепиской. "
+                "Если вопрос ещё актуален — нажми «Вернуть в работу»."
+            )
         else:
             changed = await update_ticket_status(
                 ticket_id,
@@ -185,6 +191,11 @@ async def _submit_comment_text(target, state: FSMContext, comment_text: str):
                 f"✅ Новый ответ в тикете #{ticket_id}.\n\n"
                 f"Тикет помечен выполненным. Подтверди выполнение или верни тикет в работу.\n\n"
                 f"{safe_comment}"
+            )
+            completion_headline = (
+                f"✅ Тикет #{ticket_id} помечен выполненным.\n"
+                "Ниже — полная карточка тикета со всей перепиской. "
+                "Подтверди выполнение или верни тикет в работу."
             )
     else:
         auto_close_cancelled = await add_ticket_comment(
@@ -215,12 +226,19 @@ async def _submit_comment_text(target, state: FSMContext, comment_text: str):
             use_ticket_actions=False,
         )
     else:
-        await notify_ticket_creator(
-            bot=bot,
-            ticket=updated_ticket,
-            text=notify_text,
-            reply_markup=delayed_close_markup,
-        )
+        if completion_headline:
+            await send_completed_ticket_card_to_creator(
+                bot=bot,
+                ticket=updated_ticket,
+                headline=completion_headline,
+            )
+        else:
+            await notify_ticket_creator(
+                bot=bot,
+                ticket=updated_ticket,
+                text=notify_text,
+                reply_markup=delayed_close_markup,
+            )
     if isinstance(target, CallbackQuery):
         await target.answer()
 
@@ -256,7 +274,7 @@ async def ticket_resolve_callback(call: CallbackQuery):
             ticket_id,
             "done",
             actor_telegram_id=call.from_user.id,
-            comment="Исполнитель выполнил тикет. Тикет закрыт без таймера ожидания.",
+            comment=None,
             expected_statuses=("new", "in_work"),
         )
         if not changed:
@@ -267,12 +285,13 @@ async def ticket_resolve_callback(call: CallbackQuery):
 
         await call.message.edit_reply_markup(reply_markup=ticket_action_keyboard(updated_ticket, user, admin_flag))
 
-        await notify_ticket_creator(
+        await send_completed_ticket_card_to_creator(
             bot=call.bot,
             ticket=updated_ticket,
-            text=(
-                f"✅ Тикет #{ticket_id} выполнен и закрыт.\n\n"
-                "Если вопрос ещё актуален — верни тикет в работу."
+            headline=(
+                f"✅ Тикет #{ticket_id} выполнен и закрыт.\n"
+                "Ниже — полная карточка тикета со всей перепиской. "
+                "Если вопрос ещё актуален — нажми «Вернуть в работу»."
             ),
         )
     else:
@@ -280,7 +299,7 @@ async def ticket_resolve_callback(call: CallbackQuery):
             ticket_id,
             "waiting_confirmation",
             actor_telegram_id=call.from_user.id,
-            comment="Исполнитель пометил тикет выполненным. Ожидается подтверждение автора.",
+            comment=None,
             expected_statuses=("new", "in_work"),
         )
         if not changed:
@@ -291,10 +310,14 @@ async def ticket_resolve_callback(call: CallbackQuery):
 
         await call.message.edit_reply_markup(reply_markup=ticket_action_keyboard(updated_ticket, user, admin_flag))
 
-        await notify_ticket_creator(
+        await send_completed_ticket_card_to_creator(
             bot=call.bot,
             ticket=updated_ticket,
-            text=f"✅ Тикет #{ticket_id} помечен выполненным.\n\nПодтверди выполнение или верни тикет в работу."
+            headline=(
+                f"✅ Тикет #{ticket_id} помечен выполненным.\n"
+                "Ниже — полная карточка тикета со всей перепиской. "
+                "Подтверди выполнение или верни тикет в работу."
+            ),
         )
 
     await call.answer()

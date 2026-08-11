@@ -82,12 +82,18 @@ async def run_selftest() -> None:
     database_path.unlink(missing_ok=True)
 
     from app.database import init_db
-    from app.handlers.tickets.utils import can_participant_cancel_ticket, can_user_return_ticket, extract_order_number
+    from app.handlers.tickets.utils import (
+        can_participant_cancel_ticket,
+        can_user_return_ticket,
+        extract_order_number,
+        notify_department_about_ticket,
+    )
     from app.keyboards.admin import admin_menu
     from app.keyboards.common import bottom_menu_for_role, main_menu_for_role, ticket_work_menu_keyboard
     from app.keyboards.productivity import work_hub_keyboard
     from app.keyboards.tickets import post_create_options_keyboard, ticket_action_keyboard, ticket_notification_keyboard
     from app.services.analytics import collect_daily_stats, export_statistics_csv
+    from app.services.attachments import create_attachment
     from app.services.backups import create_database_backup
     from app.services.feedback import create_feedback, get_feedback, list_feedback
     from app.services.polls import create_poll, get_poll_results, upsert_vote
@@ -116,8 +122,10 @@ async def run_selftest() -> None:
     from app.services.templates import create_response_template, get_response_templates, update_response_template
     from app.services.order_status import (
         build_order_status_index,
+        build_purchasing_snapshot,
         extract_order_number_from_query,
         format_purchasing_lines,
+        get_order_status,
     )
     from app.services.tickets import (
         add_ticket_comment,
@@ -125,14 +133,17 @@ async def run_selftest() -> None:
         count_tickets_for_department_reminder,
         create_ticket,
         get_active_users_by_department,
+        get_archive_incoming_tickets,
         get_ticket_by_id,
         get_ticket_events,
+        search_archive_tickets,
         schedule_ticket_auto_close,
         set_ticket_category,
         set_ticket_priority,
         take_ticket,
         update_ticket_status,
     )
+    from app.services.update_manager import predict_next_version
     from app.services.work_management import (
         assign_ticket,
         clear_day_off,
@@ -158,6 +169,10 @@ async def run_selftest() -> None:
     from app.handlers import admin, admin_feedback, admin_productivity, admin_ui_metrics, help, start, system, tickets, updater  # noqa: F401
 
     _prepare_legacy_database(database_path)
+    _assert(predict_next_version("2.6.0", "patch") == "2.6.1", "Patch SemVer рассчитывается неверно")
+    _assert(predict_next_version("2.6.9", "minor") == "2.7.0", "Minor SemVer рассчитывается неверно")
+    _assert(predict_next_version("2.9.9", "major") == "3.0.0", "Major SemVer рассчитывается неверно")
+
     await init_db()
     await _prepare_users(database_path)
 
@@ -433,6 +448,29 @@ async def run_selftest() -> None:
     )
     _assert(sum(bool(value) for value in close_results) == 1, "Автозакрытие выполнилось повторно")
 
+    # Регрессия архива: обычное открытие входящего архива не должно зависеть
+    # от переменной поискового запроса ticket_id. Эта проверка ловит ошибку
+    # NameError, которая появилась при добавлении поиска архива по номеру тикета.
+    incoming_archive = await get_archive_incoming_tickets("purchasing", limit=None)
+    _assert(
+        delayed_ticket in [int(row["id"]) for row in incoming_archive],
+        "Закрытый тикет не попал в архив входящих закупки",
+    )
+
+    archive_search = await search_archive_tickets(
+        str(delayed_ticket),
+        telegram_id=1001,
+        department="client",
+        is_observer=False,
+        is_admin=False,
+        limit=200,
+    )
+    _assert(archive_search, "Поиск архива по номеру тикета ничего не вернул")
+    _assert(
+        int(archive_search[0]["id"]) == delayed_ticket,
+        "Точное совпадение номера тикета не стоит первым в поиске архива",
+    )
+
     confirmation_ticket = await create_ticket(
         title="Двухэтапное подтверждение",
         description="Старое направление должно сохраниться",
@@ -542,6 +580,124 @@ async def run_selftest() -> None:
         )[0] == "9073, Не оплачено, заказ 119551/245244, Заказ доставляется",
         "Нестандартное количество или номер ПЗ обработаны неверно",
     )
+    incoming_snapshot = build_purchasing_snapshot(sheet_index["11786"])
+    _assert(
+        "Статус МС: [O] Ожидание товара" in incoming_snapshot
+        and "14163, 1 шт, заказ 388776, Заказ доставляется" in incoming_snapshot
+        and "28599, 1 шт, заказ 119861/245415, Заказ доставляется" in incoming_snapshot,
+        "Снимок заказа для входящего тикета сформирован неполно",
+    )
+
+    # Проверяем новый read-only источник OrderExporter без Google Sheets.
+    order_db_path = database_path.with_name("orderexporter-selftest.db")
+    order_db_path.unlink(missing_ok=True)
+    with sqlite3.connect(order_db_path) as order_db:
+        order_db.executescript(
+            """
+            CREATE TABLE sync_runs (
+                id INTEGER PRIMARY KEY, finished_at TEXT, status TEXT, app_version TEXT
+            );
+            CREATE TABLE moysklad_orders (
+                ms_order_id TEXT PRIMARY KEY, bs_order_number TEXT, status_name TEXT,
+                active_in_selection INTEGER, updated_at_ms TEXT
+            );
+            CREATE TABLE moysklad_order_items (
+                ms_position_id TEXT PRIMARY KEY, ms_order_id TEXT, sku_raw TEXT,
+                sku_normalized TEXT, quantity_text TEXT, name TEXT, active INTEGER
+            );
+            CREATE TABLE current_supplier_statuses (
+                provider TEXT, external_order_id TEXT, sku_raw TEXT, sku_normalized TEXT,
+                quantity_text TEXT, source_quantity_text TEXT, effective_quantity_text TEXT,
+                raw_status TEXT, normalized_status TEXT, bs_order_number TEXT
+            );
+            CREATE TABLE supplier_status_current (
+                provider TEXT, external_order_id TEXT, raw_status TEXT, normalized_status TEXT,
+                ready_detected_at TEXT, issued_detected_at TEXT
+            );
+            CREATE TABLE supplier_orders (
+                id INTEGER PRIMARY KEY, provider TEXT, external_order_id TEXT
+            );
+            CREATE TABLE supplier_order_state (
+                supplier_order_id INTEGER, bs_order_number TEXT, quantity_text TEXT, active INTEGER
+            );
+            """
+        )
+        order_db.execute(
+            "INSERT INTO sync_runs VALUES (1, ?, 'SUCCESS', '2.7.1-beta')",
+            (datetime.now(ZoneInfo("UTC")).isoformat(),),
+        )
+        order_db.execute(
+            "INSERT INTO moysklad_orders VALUES ('ms1', '11786', '[O] Ожидание товара', 1, '')"
+        )
+        order_db.executemany(
+            "INSERT INTO moysklad_order_items VALUES (?, 'ms1', ?, ?, ?, ?, 1)",
+            [
+                ('p1', '14163', '14163', '1', 'Товар 1'),
+                ('p2', '28599', '28599', '2', 'Товар 2'),
+                ('p3', '0288', '288', '1', 'Товар с ведущим нулём'),
+            ],
+        )
+        order_db.executemany(
+            "INSERT INTO current_supplier_statuses VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '11786')",
+            [
+                # В live-data остаток 1, но заказу BS назначено 2: основная строка должна показать 2.
+                ('privoz', '388776', '14163', '14163', '2', '2', '1', 'Выдан частично', 'ready'),
+                ('pozakupy', '119861/245415', '28599', '28599', '2', '2', '2', 'На складе', 'ready'),
+                ('privoz', '399999', '288', '288', '1', '1', '1', 'Выдан со склада', 'issued'),
+                # Старая связь остаётся видимой во view, но active=0 в supplier_order_state — не показывать.
+                ('privoz', '399998', '288', '288', '9', '9', '9', 'Выдан со склада', 'issued'),
+            ],
+        )
+        order_db.executemany(
+            "INSERT INTO supplier_status_current VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                ('privoz', '388776', 'Выдан частично', 'ready', '2026-08-08T14:45:00+00:00', None),
+                ('pozakupy', '119861/245415', 'На складе', 'ready', '2026-08-08T17:45:00+03:00', None),
+                ('privoz', '399999', 'Выдан со склада', 'issued', '2026-08-08T12:00:00+00:00', '2026-08-09T10:00:00+00:00'),
+                ('privoz', '399998', 'Выдан со склада', 'issued', '2026-08-07T12:00:00+00:00', '2026-08-08T10:00:00+00:00'),
+            ],
+        )
+        order_db.executemany(
+            "INSERT INTO supplier_orders(id, provider, external_order_id) VALUES (?, ?, ?)",
+            [
+                (1, 'privoz', '388776'),
+                (2, 'pozakupy', '119861/245415'),
+                (3, 'privoz', '399999'),
+                (4, 'privoz', '399998'),
+            ],
+        )
+        order_db.executemany(
+            "INSERT INTO supplier_order_state(supplier_order_id, bs_order_number, quantity_text, active) VALUES (?, '11786', ?, ?)",
+            [
+                (1, '2', 1),
+                (2, '2', 1),
+                (3, '1', 1),
+                (4, '9', 0),
+            ],
+        )
+        order_db.commit()
+
+    from app.config import settings as runtime_settings
+    runtime_settings.order_database_path = str(order_db_path)
+    runtime_settings.order_database_stale_after_seconds = 86400
+    order_lookup = await get_order_status("11786")
+    _assert(order_lookup.record is not None, "OrderExporter не вернул существующий BS")
+    _assert(
+        "14163, 2 шт, заказ 388776, Выдан частично — Приход на склад 08.08.2026 17:45 (остаток у поставщика: 1 шт)"
+        in order_lookup.record.purchasing_items
+        and "28599, 2 шт, заказ 119861/245415, На складе — Приход на склад 08.08.2026 17:45" in order_lookup.record.purchasing_items
+        and "0288, 1 шт, заказ 399999, Выдан со склада — дата выдачи 09.08.2026 13:00" in order_lookup.record.purchasing_items,
+        "Карточка поставщиков из OrderExporter сформирована неверно или потеряны даты прихода/выдачи",
+    )
+    _assert(
+        any("Выдан со склада — дата выдачи 09.08.2026 13:00" in line for line in order_lookup.record.client_items)
+        and any("Приход на склад 08.08.2026 17:45" in line for line in order_lookup.record.client_items),
+        "Даты прихода/выдачи не попали в клиентский блок проверки заказа",
+    )
+    _assert(
+        all("399998" not in line for line in order_lookup.record.purchasing_items),
+        "Неактивное назначение supplier_order_state.active=0 попало в текущие статусы",
+    )
 
     snapshot_ticket = await create_ticket(
         title="Вопрос из статуса заказа",
@@ -570,6 +726,7 @@ async def run_selftest() -> None:
     class _FakeBot:
         def __init__(self):
             self.sent: list[tuple[int, str]] = []
+            self.media: list[tuple[str, int, str, str]] = []
             self.deleted: list[tuple[int, int]] = []
             self.next_message_id = 500
 
@@ -578,8 +735,57 @@ async def run_selftest() -> None:
             self.next_message_id += 1
             return _FakeSentMessage(self.next_message_id)
 
+        async def _send_media(self, kind: str, chat_id: int, file_id: str, caption: str = "", reply_markup=None):
+            self.media.append((kind, int(chat_id), str(file_id), str(caption or "")))
+            self.next_message_id += 1
+            return _FakeSentMessage(self.next_message_id)
+
+        async def send_photo(self, *, chat_id: int, photo: str, caption: str = "", reply_markup=None):
+            return await self._send_media("photo", chat_id, photo, caption, reply_markup)
+
+        async def send_document(self, *, chat_id: int, document: str, caption: str = "", reply_markup=None):
+            return await self._send_media("document", chat_id, document, caption, reply_markup)
+
+        async def send_video(self, *, chat_id: int, video: str, caption: str = "", reply_markup=None):
+            return await self._send_media("video", chat_id, video, caption, reply_markup)
+
         async def delete_message(self, *, chat_id: int, message_id: int):
             self.deleted.append((int(chat_id), int(message_id)))
+
+        async def edit_message_text(self, *, chat_id: int, message_id: int, text: str, reply_markup=None):
+            if not hasattr(self, "edited"):
+                self.edited = []
+            self.edited.append((int(chat_id), int(message_id), str(text)))
+            return _FakeSentMessage(message_id)
+
+    # Первое уведомление о новом входящем тикете должно использовать тот же
+    # медиарендерер, что и ручное открытие карточки: фото является карточкой,
+    # а не отдельным сообщением/строкой «Есть вложения».
+    await create_attachment(
+        ticket_id=snapshot_ticket,
+        file_id="selftest-photo-file-id",
+        file_type="photo",
+        uploaded_by=1001,
+    )
+    incoming_card_bot = _FakeBot()
+    await notify_department_about_ticket(
+        bot=incoming_card_bot,
+        department="purchasing",
+        text="Этот старый текст уведомления не должен использоваться",
+        exclude_telegram_id=1001,
+        ticket_id=snapshot_ticket,
+        use_ticket_actions=True,
+        render_ticket_card=True,
+    )
+    _assert(len(incoming_card_bot.media) == 2, "Новая входящая карточка с фото не доставлена обоим закупщикам")
+    _assert(
+        all(item[0] == "photo" and item[2] == "selftest-photo-file-id" for item in incoming_card_bot.media),
+        "Вложение нового входящего тикета не стало частью карточки",
+    )
+    _assert(
+        all(f"🎫 Тикет #{snapshot_ticket}" in item[3] and "Когда будет поставка?" in item[3] for item in incoming_card_bot.media),
+        "Первое уведомление не использует актуальный формат карточки тикета",
+    )
 
     fake_bot = _FakeBot()
     await send_live_ticket_text(
@@ -610,6 +816,15 @@ async def run_selftest() -> None:
         "Новый служебный экран не стал единственным актуальным",
     )
 
+    await set_ui_message_ids(1001, "primary", [777])
+    edit_bot = _FakeBot()
+    await send_ui_text(edit_bot, chat_id=1001, text="Трансформированный экран")
+    _assert(
+        getattr(edit_bot, "edited", []) == [(1001, 777, "Трансформированный экран")],
+        "Одиночный inline-экран не редактируется на месте",
+    )
+    _assert(not edit_bot.sent, "При успешном editMessageText создано лишнее сообщение")
+
     reply_menu_texts = {button.text for row in bottom_menu_for_role("client").keyboard for button in row}
     inline_callbacks = {
         button.callback_data
@@ -618,7 +833,8 @@ async def run_selftest() -> None:
         if getattr(button, "callback_data", None)
     }
     _assert("🔎 Узнать статус заказа" in reply_menu_texts, "В нижнем меню нет проверки заказа")
-    _assert("📂 Работа с тикетами" in reply_menu_texts, "В нижнем меню нет компактного раздела тикетов")
+    _assert("🏠 Меню" in reply_menu_texts, "В нижнем меню нет постоянной кнопки вызова inline-панели")
+    _assert("📂 Работа с тикетами" not in reply_menu_texts, "Глубокий раздел тикетов не должен занимать нижнее меню")
     _assert("📤 Исходящие" not in reply_menu_texts, "Исходящие не спрятаны из главного меню")
     _assert("❓ Помощь" in reply_menu_texts, "В нижнем меню нет центра помощи")
     _assert("order_status_start" in inline_callbacks, "В inline-меню нет проверки заказа")

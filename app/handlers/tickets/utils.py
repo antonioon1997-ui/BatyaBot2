@@ -397,6 +397,7 @@ async def notify_department_about_ticket(
     exclude_telegram_id: int | None = None,
     ticket_id: int | None = None,
     use_ticket_actions: bool = False,
+    render_ticket_card: bool = False,
 ):
     ticket = await get_ticket_by_id(ticket_id) if ticket_id is not None else None
     users = await get_active_users_by_department(department)
@@ -416,7 +417,19 @@ async def notify_department_about_ticket(
             keyboard = main_menu_for_role(role=row_get(user, "role"), is_admin=False)
 
         try:
-            if ticket:
+            if ticket and render_ticket_card:
+                # Импорт внутри функции исключает циклическую зависимость utils <-> views.
+                # Первое уведомление должно выглядеть ровно как ручное открытие тикета.
+                from .views import send_ticket_card_to_user
+
+                await send_ticket_card_to_user(
+                    bot,
+                    ticket=ticket,
+                    user=user,
+                    admin_flag=False,
+                    mark_read=False,
+                )
+            elif ticket:
                 await send_live_ticket_text(
                     bot,
                     chat_id=telegram_id,
