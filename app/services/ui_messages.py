@@ -6,6 +6,9 @@ import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import InlineKeyboardMarkup
+
 from app.database import get_db
 from app.services.ticket_messages import delete_message_ids
 
@@ -94,6 +97,17 @@ async def get_ui_message_ids(user_id: int, slot: str = PRIMARY_UI_SLOT) -> list[
         await db.close()
 
 
+async def is_primary_ui_message(user_id: int, message_id: int | None) -> bool:
+    """Возвращает True, если callback пришёл из текущей primary UI-карточки."""
+    if message_id is None:
+        return False
+    try:
+        target = int(message_id)
+    except (TypeError, ValueError):
+        return False
+    return target in await get_ui_message_ids(int(user_id), PRIMARY_UI_SLOT)
+
+
 async def set_ui_message_ids(
     user_id: int,
     slot: str,
@@ -151,6 +165,60 @@ async def clear_ui_message_bundle(
         await delete_message_ids(bot, chat_id, old_ids)
 
 
+async def _try_edit_single_ui_message(
+    bot,
+    *,
+    chat_id: int,
+    text: str,
+    reply_markup=None,
+    slot: str = PRIMARY_UI_SLOT,
+) -> list[int] | None:
+    """Пытается превратить текущий экран в новый без отправки сообщения.
+
+    Telegram разрешает редактировать только inline-клавиатуру. Если экран
+    состоит из нескольких сообщений, содержит ReplyKeyboard или был удалён
+    пользователем, вызывающая функция автоматически перейдёт к обычной
+    отправке нового экрана.
+    """
+    if reply_markup is not None and not isinstance(reply_markup, InlineKeyboardMarkup):
+        return None
+
+    old_ids = await get_ui_message_ids(chat_id, slot)
+    if len(old_ids) != 1:
+        return None
+
+    message_id = old_ids[0]
+    try:
+        await bot.edit_message_text(
+            chat_id=int(chat_id),
+            message_id=int(message_id),
+            text=str(text),
+            reply_markup=reply_markup,
+        )
+    except TelegramBadRequest as exc:
+        # «message is not modified» означает, что требуемый экран уже открыт.
+        if "message is not modified" in str(exc).lower():
+            return [int(message_id)]
+        logger.debug(
+            "Не удалось отредактировать UI-сообщение %s в чате %s; будет создано новое",
+            message_id,
+            chat_id,
+            exc_info=True,
+        )
+        return None
+    except Exception:
+        logger.debug(
+            "Ошибка редактирования UI-сообщения %s в чате %s; будет создано новое",
+            message_id,
+            chat_id,
+            exc_info=True,
+        )
+        return None
+
+    await set_ui_message_ids(chat_id, slot, [message_id])
+    return [int(message_id)]
+
+
 async def send_ui_parts(
     bot,
     *,
@@ -158,6 +226,16 @@ async def send_ui_parts(
     parts: Sequence[UiMessagePart],
     slot: str = PRIMARY_UI_SLOT,
 ) -> list[int]:
+    if len(parts) == 1:
+        part = parts[0]
+        return await send_ui_text(
+            bot,
+            chat_id=chat_id,
+            text=str(part.text),
+            reply_markup=part.reply_markup,
+            slot=slot,
+        )
+
     sent_ids: list[int] = []
     try:
         for part in parts:
@@ -193,6 +271,32 @@ async def send_ui_text(
     slot: str = PRIMARY_UI_SLOT,
 ) -> list[int]:
     chunks = split_ui_text(text)
+
+    # Основной UX 2.6: короткие навигационные экраны не присылаются заново,
+    # а превращаются друг в друга через editMessageText.
+    if len(chunks) == 1:
+        async with _slot_lock(chat_id, slot):
+            edited = await _try_edit_single_ui_message(
+                bot,
+                chat_id=int(chat_id),
+                text=chunks[0],
+                reply_markup=reply_markup,
+                slot=slot,
+            )
+            if edited is not None:
+                return edited
+
+            message = await bot.send_message(
+                chat_id=int(chat_id),
+                text=chunks[0],
+                reply_markup=reply_markup,
+            )
+            new_id = int(message.message_id)
+            old_ids = await get_ui_message_ids(chat_id, slot)
+            await set_ui_message_ids(chat_id, slot, [new_id])
+            await delete_message_ids(bot, chat_id, (item for item in old_ids if item != new_id))
+            return [new_id]
+
     parts = [
         UiMessagePart(
             text=(f"Часть {index + 1}/{len(chunks)}\n\n" if len(chunks) > 1 else "") + chunk,
@@ -200,7 +304,26 @@ async def send_ui_text(
         )
         for index, chunk in enumerate(chunks)
     ]
-    return await send_ui_parts(bot, chat_id=chat_id, parts=parts, slot=slot)
+    # Для длинных экранов оставляем безопасную замену комплектом сообщений.
+    sent_ids: list[int] = []
+    try:
+        for part in parts:
+            message = await bot.send_message(
+                chat_id=int(chat_id),
+                text=str(part.text),
+                reply_markup=part.reply_markup,
+            )
+            sent_ids.append(int(message.message_id))
+    except Exception:
+        await delete_message_ids(bot, chat_id, sent_ids)
+        raise
+    await replace_ui_message_bundle(
+        bot,
+        chat_id=int(chat_id),
+        new_message_ids=sent_ids,
+        slot=slot,
+    )
+    return sent_ids
 
 
 async def delete_trigger_message(message) -> None:

@@ -10,7 +10,7 @@ ACTIVE_INTERFACE_FILE = INTERFACE_VERSIONS_DIR / "active.json"
 KEEP_INTERFACE_VERSIONS = 5
 
 LEGACY_UI_ID = "ui_2_2_classic"
-CURRENT_UI_ID = "ui_2_5_compact_tickets"
+CURRENT_UI_ID = "ui_2_7_pc_workspace"
 
 BUILTIN_PROFILES: tuple[dict, ...] = (
     {
@@ -40,7 +40,7 @@ BUILTIN_PROFILES: tuple[dict, ...] = (
         },
     },
     {
-        "id": CURRENT_UI_ID,
+        "id": "ui_2_5_compact_tickets",
         "title": "Компактное меню 2.5",
         "app_version": "2.5",
         "created_at": "2026-08-01T19:30:00+03:00",
@@ -52,6 +52,20 @@ BUILTIN_PROFILES: tuple[dict, ...] = (
             "compact_main_menu": True,
         },
     },
+    {
+        "id": CURRENT_UI_ID,
+        "title": "PC-first workspace 2.7",
+        "app_version": "2.7.0",
+        "created_at": "2026-08-11T19:47:00+03:00",
+        "description": "Единая рабочая область тикетов для Telegram Desktop: списки и карточки редактируют одно сообщение, нижнее меню сохранено.",
+        "config": {
+            "show_help_button": True,
+            "show_help_settings": True,
+            "allow_friendly_style": True,
+            "compact_main_menu": True,
+            "pc_ticket_workspace": True,
+        },
+    },
 )
 
 DEFAULT_CONFIG = {
@@ -59,6 +73,7 @@ DEFAULT_CONFIG = {
     "show_help_settings": True,
     "allow_friendly_style": True,
     "compact_main_menu": True,
+    "pc_ticket_workspace": False,
 }
 
 
@@ -87,7 +102,7 @@ def ensure_ui_versions() -> None:
 
     if current_profile_was_missing and ACTIVE_INTERFACE_FILE.exists():
         previous_active = get_active_ui_id(ensure=False)
-        if previous_active == "ui_2_3_help_center":
+        if previous_active in {"ui_2_3_help_center", "ui_2_5_compact_tickets"}:
             _atomic_json(ACTIVE_INTERFACE_FILE, {"active_id": CURRENT_UI_ID})
 
     profiles = list_ui_versions(ensure=False)
@@ -202,3 +217,7 @@ def friendly_style_enabled() -> bool:
 
 def compact_main_menu_enabled() -> bool:
     return bool(get_active_ui_config().get("compact_main_menu", True))
+
+
+def pc_ticket_workspace_enabled() -> bool:
+    return bool(get_active_ui_config().get("pc_ticket_workspace", False))

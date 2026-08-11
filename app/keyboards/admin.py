@@ -1,78 +1,66 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
 from .common import access_request_keyboard, compact_button_rows, compact_ticket_button_text
+from app.services.ui_versions import pc_ticket_workspace_enabled
 
 def admin_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="👥 Заявки на доступ",
-                    callback_data="admin_access_requests"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📋 Пользователи",
-                    callback_data="admin_users"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🎫 Все тикеты",
-                    callback_data="admin_tickets"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔔 Напомнить о тикетах",
-                    callback_data="admin_ticket_reminders"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⏰ Время напоминаний",
-                    callback_data="admin_reminder_time"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📊 Мини-статистика",
-                    callback_data="admin_stats"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📈 Статистика и экспорт",
-                    callback_data="admin_analytics"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📝 Заметки об обновлениях",
-                    callback_data="admin_notes"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="💬 Обратная связь",
-                    callback_data="admin_feedback"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔄 Обновления",
-                    callback_data="admin_updates_menu"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Главное меню",
-                    callback_data="main_menu"
-                )
-            ],
-        ]
-    )
+    """В PC-first четыре группы; старый UI-профиль получает прежнее меню."""
+    if not pc_ticket_workspace_enabled():
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👥 Заявки на доступ", callback_data="admin_access_requests")],
+            [InlineKeyboardButton(text="📋 Пользователи", callback_data="admin_users")],
+            [InlineKeyboardButton(text="🎫 Все тикеты", callback_data="admin_tickets")],
+            [InlineKeyboardButton(text="🔔 Напомнить о тикетах", callback_data="admin_ticket_reminders")],
+            [InlineKeyboardButton(text="⏰ Время напоминаний", callback_data="admin_reminder_time")],
+            [InlineKeyboardButton(text="📊 Мини-статистика", callback_data="admin_stats")],
+            [InlineKeyboardButton(text="📈 Статистика и экспорт", callback_data="admin_analytics")],
+            [InlineKeyboardButton(text="📝 Заметки об обновлениях", callback_data="admin_notes")],
+            [InlineKeyboardButton(text="💬 Обратная связь", callback_data="admin_feedback")],
+            [InlineKeyboardButton(text="🔄 Обновления", callback_data="admin_updates_menu")],
+            [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")],
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Пользователи и доступ", callback_data="admin_section_users")],
+        [InlineKeyboardButton(text="🎫 Тикеты и напоминания", callback_data="admin_section_tickets")],
+        [InlineKeyboardButton(text="📊 Статистика и экспорт", callback_data="admin_section_stats")],
+        [InlineKeyboardButton(text="🔄 Бот и обновления", callback_data="admin_section_system")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")],
+    ])
+
+
+def admin_users_section_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Заявки на доступ", callback_data="admin_access_requests")],
+        [InlineKeyboardButton(text="📋 Пользователи", callback_data="admin_users")],
+        [InlineKeyboardButton(text="↩️ Админка", callback_data="admin_menu")],
+    ])
+
+
+def admin_tickets_section_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎫 Все тикеты", callback_data="admin_tickets")],
+        [InlineKeyboardButton(text="🔔 Напомнить о тикетах", callback_data="admin_ticket_reminders")],
+        [InlineKeyboardButton(text="⏰ Время напоминаний", callback_data="admin_reminder_time")],
+        [InlineKeyboardButton(text="📋 Сводка по тикетам", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="↩️ Админка", callback_data="admin_menu")],
+    ])
+
+
+def admin_stats_section_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📈 Статистика и экспорт", callback_data="admin_analytics")],
+        [InlineKeyboardButton(text="↩️ Админка", callback_data="admin_menu")],
+    ])
+
+
+def admin_system_section_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновления", callback_data="admin_updates_menu")],
+        [InlineKeyboardButton(text="📝 Заметки об обновлениях", callback_data="admin_notes")],
+        [InlineKeyboardButton(text="💬 Обратная связь", callback_data="admin_feedback")],
+        [InlineKeyboardButton(text="↩️ Админка", callback_data="admin_menu")],
+    ])
+
 
 def admin_ticket_reminder_departments_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(

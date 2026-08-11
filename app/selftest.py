@@ -88,10 +88,17 @@ async def run_selftest() -> None:
         extract_order_number,
         notify_department_about_ticket,
     )
+    from app.handlers.tickets.workspace import _current_order_block
     from app.keyboards.admin import admin_menu
     from app.keyboards.common import bottom_menu_for_role, main_menu_for_role, ticket_work_menu_keyboard
     from app.keyboards.productivity import work_hub_keyboard
-    from app.keyboards.tickets import post_create_options_keyboard, ticket_action_keyboard, ticket_notification_keyboard
+    from app.keyboards.tickets import (
+        post_create_options_keyboard,
+        ticket_action_keyboard,
+        ticket_notification_keyboard,
+        ticket_workspace_keyboard,
+        workspace_ticket_action_keyboard,
+    )
     from app.services.analytics import collect_daily_stats, export_statistics_csv
     from app.services.attachments import create_attachment
     from app.services.backups import create_database_backup
@@ -100,6 +107,7 @@ async def run_selftest() -> None:
     from app.services.preferences import get_message_style, set_message_style
     from app.services.project_export import create_project_export
     from app.services.ticket_messages import get_ticket_message_ids, send_live_ticket_text, set_ticket_message_ids
+    from app.services.ui_context import get_ui_context, set_ticket_list_context
     from app.services.ui_messages import get_ui_message_ids, send_ui_text, set_ui_message_ids
     from app.services.ui_metrics import (
         classify_callback_button,
@@ -118,6 +126,7 @@ async def run_selftest() -> None:
         get_active_ui_id,
         help_button_enabled,
         list_ui_versions,
+        pc_ticket_workspace_enabled,
     )
     from app.services.templates import create_response_template, get_response_templates, update_response_template
     from app.services.order_status import (
@@ -189,7 +198,7 @@ async def run_selftest() -> None:
             "ticket_reads", "ticket_transfer_requests", "ticket_assignment_history",
             "day_off_releases", "response_templates", "ticket_metrics", "daily_stats",
             "feedback_messages", "polls", "poll_votes", "admin_notes", "ui_button_events",
-            "ticket_message_registry", "ui_message_registry",
+            "ticket_message_registry", "ui_message_registry", "ui_navigation_state",
         ):
             _assert(required_table in tables, f"Не создана таблица {required_table}")
         template_count = connection.execute(
@@ -213,11 +222,27 @@ async def run_selftest() -> None:
     # Центр помощи, персональный стиль, обратная связь и голосования.
     ensure_ui_versions()
     _assert(get_active_ui_id() == CURRENT_UI_ID, "Новая версия интерфейса не активирована по умолчанию")
-    _assert(help_button_enabled(), "В интерфейсе 2.3 скрыта кнопка помощи")
+    _assert(help_button_enabled(), "В текущем интерфейсе скрыта кнопка помощи")
+    _assert(pc_ticket_workspace_enabled(), "PC-first workspace не включён в текущем UI-профиле")
     _assert(len(list_ui_versions()) <= 5, "Хранится больше пяти версий интерфейса")
     activate_ui_version(LEGACY_UI_ID)
     _assert(not help_button_enabled(), "Классический интерфейс не скрывает центр помощи")
+    _assert(not pc_ticket_workspace_enabled(), "Откат UI не отключает PC-first workspace")
     activate_ui_version(CURRENT_UI_ID)
+    _assert(pc_ticket_workspace_enabled(), "PC-first workspace не восстановился после возврата UI-профиля")
+
+    await set_ticket_list_context(
+        1001,
+        list_type="incoming",
+        page=2,
+        queue_ids=[101, 102, 103],
+        filters={"status": "new"},
+        mode="normal",
+    )
+    ui_context = await get_ui_context(1001)
+    _assert(ui_context.list_type == "incoming" and ui_context.page == 2, "UI context не сохраняет список/страницу")
+    _assert(ui_context.queue == [101, 102, 103], "UI context не сохраняет очередь тикетов")
+    _assert(ui_context.filters_dict.get("status") == "new", "UI context не сохраняет фильтр")
 
     _assert(await set_message_style(1001, "friendly") == "friendly", "Не сохраняется дружелюбный стиль")
     _assert(await get_message_style(1001) == "friendly", "Дружелюбный стиль не читается")
@@ -699,6 +724,19 @@ async def run_selftest() -> None:
         "Неактивное назначение supplier_order_state.active=0 попало в текущие статусы",
     )
 
+    workspace_order_block = await _current_order_block(
+        {"order_number": "11786"},
+        {"role": "purchasing"},
+        False,
+    )
+    _assert(
+        workspace_order_block
+        and "Статусы заказов поставщиков:" in workspace_order_block
+        and "119861/245415" in workspace_order_block
+        and "Приход на склад 08.08.2026 17:45" in workspace_order_block,
+        "Workspace-карточка потеряла актуальные статусы заказов поставщиков",
+    )
+
     snapshot_ticket = await create_ticket(
         title="Вопрос из статуса заказа",
         description="Когда будет поставка?",
@@ -834,11 +872,34 @@ async def run_selftest() -> None:
     }
     _assert("🔎 Узнать статус заказа" in reply_menu_texts, "В нижнем меню нет проверки заказа")
     _assert("🏠 Меню" in reply_menu_texts, "В нижнем меню нет постоянной кнопки вызова inline-панели")
-    _assert("📂 Работа с тикетами" not in reply_menu_texts, "Глубокий раздел тикетов не должен занимать нижнее меню")
+    _assert("📂 Работа с тикетами" in reply_menu_texts, "В PC-first нижнем меню нет прямого входа в работу с тикетами")
     _assert("📤 Исходящие" not in reply_menu_texts, "Исходящие не спрятаны из главного меню")
     _assert("❓ Помощь" in reply_menu_texts, "В нижнем меню нет центра помощи")
     _assert("order_status_start" in inline_callbacks, "В inline-меню нет проверки заказа")
     _assert("ticket_work_menu" in inline_callbacks, "В inline-меню нет раздела работы с тикетами")
+    reply_layout = [[button.text for button in row] for row in bottom_menu_for_role("client").keyboard]
+    inline_layout = [[button.text for button in row] for row in main_menu_for_role("client").inline_keyboard]
+    admin_inline_layout = [[button.text for button in row] for row in main_menu_for_role("admin", is_admin=True).inline_keyboard]
+    expected_reply_layout = [
+        ["➕ Создать тикет"],
+        ["📂 Работа с тикетами", "🔎 Узнать статус заказа"],
+        ["🏠 Меню", "❓ Помощь"],
+    ]
+    expected_inline_layout = [
+        ["➕ Создать тикет"],
+        ["🔎 Узнать статус заказа"],
+        ["📂 Работа с тикетами", "❓ Помощь"],
+    ]
+    _assert(reply_layout == expected_reply_layout, "Нижнее PC-first меню изменилось, хотя должно остаться прежним")
+    _assert(inline_layout == expected_inline_layout, "Inline PC-first меню имеет неверное расположение кнопок")
+    _assert(
+        all("🏠 Меню" not in row for row in inline_layout),
+        "В главной inline-панели осталась бессмысленная кнопка «Меню», ведущая сама на себя",
+    )
+    _assert(
+        admin_inline_layout == expected_inline_layout + [["⚙️ Админка"]],
+        "Админская inline-панель должна отличаться только четвёртым рядом «Админка»",
+    )
     work_callbacks = {
         button.callback_data
         for row in ticket_work_menu_keyboard().inline_keyboard
@@ -855,7 +916,56 @@ async def run_selftest() -> None:
         for button in row
         if getattr(button, "callback_data", None)
     }
+    _assert(
+        {"admin_section_users", "admin_section_tickets", "admin_section_stats", "admin_section_system"} <= admin_callbacks,
+        "Админка не сгруппирована в четыре PC-first раздела",
+    )
     _assert("admin_templates" not in admin_callbacks, "Отключённые шаблоны остались в админке")
+
+    workspace_list = ticket_workspace_keyboard(
+        [await get_ticket_by_id(assignment_ticket)],
+        list_type="incoming",
+        page=0,
+        page_size=5,
+        total=1,
+    )
+    workspace_callbacks = {
+        button.callback_data
+        for row in workspace_list.inline_keyboard
+        for button in row
+        if getattr(button, "callback_data", None)
+    }
+    _assert(
+        {"workspace_list:incoming:0", "workspace_list:work:0", "workspace_list:outgoing:0", "workspace_list:archive:0"} <= workspace_callbacks,
+        "Workspace не содержит переключатели списков",
+    )
+    _assert("workspace_review_start:incoming" in workspace_callbacks, "В workspace нет режима разбора")
+
+    workspace_card = workspace_ticket_action_keyboard(
+        await get_ticket_by_id(assignment_ticket),
+        {"telegram_id": requester, "role": "purchasing"},
+        False,
+        position=0,
+        total=2,
+    )
+    workspace_card_texts = {button.text for row in workspace_card.inline_keyboard for button in row}
+    _assert("💬 Ответить" in workspace_card_texts, "В workspace пропала отдельная кнопка «Ответить»")
+    _assert("🏁 Выполнить" in workspace_card_texts, "В workspace пропала отдельная кнопка «Выполнить»")
+    _assert("✅ Ответить и выполнить" not in workspace_card_texts, "В workspace осталась удалённая кнопка «Ответить и выполнить»")
+    workspace_rows = [[button.text for button in row] for row in workspace_card.inline_keyboard]
+    flattened_workspace = [text for row in workspace_rows for text in row]
+    _assert("След. тикет ▶" in flattened_workspace, "Кнопка следующего тикета имеет неясную подпись")
+    _assert("⚙️ Все возможные действия" in flattened_workspace, "Расширенные действия не получили понятную подпись")
+    _assert(workspace_rows[-1] == ["↩️ К списку"], "Кнопка возврата к списку должна быть последней в карточке")
+    legacy_card = ticket_action_keyboard(
+        await get_ticket_by_id(assignment_ticket),
+        {"telegram_id": requester, "role": "purchasing"},
+        False,
+    )
+    legacy_card_texts = {button.text for row in legacy_card.inline_keyboard for button in row}
+    _assert("💬 Ответить" in legacy_card_texts, "В legacy-карточке пропала отдельная кнопка «Ответить»")
+    _assert("🏁 Выполнить" in legacy_card_texts, "В legacy-карточке пропала отдельная кнопка «Выполнить»")
+    _assert("✅ Ответить и выполнить" not in legacy_card_texts, "В уведомлениях осталась удалённая кнопка «Ответить и выполнить»")
     _assert(html_escape("5 < 10 & 12 > 3") == "5 &lt; 10 &amp; 12 &gt; 3", "HTML не экранируется")
     _assert(format_moscow_datetime("2026-01-01 00:00:00").endswith("03:00 МСК"), "Неверное преобразование UTC в МСК")
 
@@ -865,7 +975,12 @@ async def run_selftest() -> None:
     _assert(csv_payload.startswith(b"\xef\xbb\xbf") and len(csv_payload) > 100, "CSV статистики не сформирован")
 
     # Telegram ограничивает callback_data 64 байтами: проверяем новые клавиатуры.
-    keyboards = [work_hub_keyboard(12), ticket_action_keyboard(await get_ticket_by_id(assignment_ticket), {"telegram_id": requester, "role": "purchasing"}, False)]
+    keyboards = [
+        work_hub_keyboard(12),
+        legacy_card,
+        workspace_list,
+        workspace_card,
+    ]
     for keyboard in keyboards:
         for row in keyboard.inline_keyboard:
             for button in row:

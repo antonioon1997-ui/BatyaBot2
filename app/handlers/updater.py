@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from app.config import settings
-from app.keyboards.common import bottom_menu_for_role
+from app.keyboards.common import bottom_menu_for_role, main_menu_for_role
 from app.keyboards.admin import (
     admin_menu,
     admin_ui_activate_confirm_keyboard,
@@ -22,7 +22,9 @@ from app.keyboards.admin import (
 from app.services.update_manager import (
     INCOMING_DIR,
     ensure_update_directories,
+    get_current_version,
     inspect_update_archive,
+    predict_next_version,
     start_external_updater,
     write_pending_job,
 )
@@ -55,8 +57,13 @@ def _inspection_text(inspection) -> str:
         for item in inspection.release_notes
         if _clean_admin_note(item)
     )
+    bump = str(inspection.manifest.get("version_bump") or "patch")
+    target_version = predict_next_version(get_current_version(), bump)
     lines = [
         "✅ <b>Архив прошёл предварительную проверку</b>",
+        "",
+        f"Текущая версия: <b>{html_escape(get_current_version())}</b>",
+        f"После установки: <b>{html_escape(target_version)}</b> ({html_escape(bump)})",
         "",
         f"Новых файлов: <b>{len(inspection.new_files)}</b>",
         f"Изменённых файлов: <b>{len(inspection.changed_files)}</b>",
@@ -94,12 +101,17 @@ async def admin_updates_menu_callback(call: CallbackQuery, state: FSMContext):
         await call.answer("Нет доступа.", show_alert=True)
         return
     await state.clear()
-    await call.message.answer(
-        "🔄 <b>Обновления</b>\n\n"
-        "Полное обновление меняет код и внутреннюю логику. Версии интерфейса хранятся отдельно, "
-        "поэтому их можно переключать без отката исправлений, базы данных и безопасности.\n\n"
-        "Система хранит до пяти версий интерфейса. Аварийные технические копии обновлятор продолжает "
-        "создавать отдельно перед установкой каждого патча.",
+    from app.services.ui_messages import send_ui_text
+    await send_ui_text(
+        call.bot,
+        chat_id=call.from_user.id,
+        text=(
+            "🔄 <b>Обновления</b>\n\n"
+            "Полное обновление меняет код и внутреннюю логику. Версии интерфейса хранятся отдельно, "
+            "поэтому их можно переключать без отката исправлений, базы данных и безопасности.\n\n"
+            "Система хранит до пяти версий интерфейса. Аварийные технические копии обновлятор продолжает "
+            "создавать отдельно перед установкой каждого патча."
+        ),
         reply_markup=admin_updates_menu_keyboard(),
     )
     await call.answer()
@@ -174,7 +186,8 @@ async def admin_update_history_callback(call: CallbackQuery):
             )
         history_text = "📋 <b>Последние обновления</b>\n\n" + "\n\n".join(blocks)
 
-    await call.message.answer(history_text, reply_markup=admin_updates_menu_keyboard())
+    from app.services.ui_messages import send_ui_text
+    await send_ui_text(call.bot, chat_id=call.from_user.id, text=history_text, reply_markup=admin_updates_menu_keyboard())
     await call.answer()
 
 
@@ -185,11 +198,16 @@ async def admin_ui_versions_callback(call: CallbackQuery):
         return
     versions = list_ui_versions()
     active_id = get_active_ui_id()
-    await call.message.answer(
-        "🎨 <b>Версии интерфейса</b>\n\n"
-        "Переключение меняет только доступные пользовательские меню и стиль системных фраз. "
-        "Тикеты, база данных, исправления, архитектура и производительность не откатываются.\n\n"
-        f"Хранится версий: <b>{len(versions)}</b> из 5.",
+    from app.services.ui_messages import send_ui_text
+    await send_ui_text(
+        call.bot,
+        chat_id=call.from_user.id,
+        text=(
+            "🎨 <b>Версии интерфейса</b>\n\n"
+            "Переключение меняет только доступные пользовательские меню и стиль системных фраз. "
+            "Тикеты, база данных, исправления, архитектура и производительность не откатываются.\n\n"
+            f"Хранится версий: <b>{len(versions)}</b> из 5."
+        ),
         reply_markup=admin_ui_versions_keyboard(versions, active_id),
     )
     await call.answer()
@@ -255,15 +273,30 @@ async def admin_ui_confirm_callback(call: CallbackQuery, bot: Bot):
         await call.answer(str(exc), show_alert=True)
         return
 
+    from app.services.ui_messages import send_ui_text
+
     users = await get_active_users()
     refreshed = 0
     for user in users:
         telegram_id = int(user["telegram_id"])
         try:
+            # ReplyKeyboard заменяем новой напрямую. Удаление клавиатуры перед
+            # перерисовкой в Telegram Desktop иногда оставляло пользователя без
+            # нижнего меню до /start. Короткое служебное сообщение остаётся как
+            # надёжный якорь постоянной клавиатуры.
             await bot.send_message(
                 telegram_id,
-                "🎨 Интерфейс бота обновлён. Нижнее меню синхронизировано.",
+                "⌨️ Нижнее меню обновлено.",
                 reply_markup=bottom_menu_for_role(
+                    user["role"],
+                    is_admin=telegram_id == int(settings.admin_id),
+                ),
+            )
+            await send_ui_text(
+                bot,
+                chat_id=telegram_id,
+                text="🏠 <b>Главное меню</b>\n\nВыбери действие:",
+                reply_markup=main_menu_for_role(
                     user["role"],
                     is_admin=telegram_id == int(settings.admin_id),
                 ),
@@ -272,9 +305,13 @@ async def admin_ui_confirm_callback(call: CallbackQuery, bot: Bot):
         except Exception:
             logger.exception("Не удалось обновить меню пользователя %s", telegram_id)
 
-    await call.message.answer(
-        f"✅ Применена версия интерфейса: <b>{html_escape(profile.get('title'))}</b>.\n\n"
-        f"Нижнее меню отправлено пользователям: {refreshed}.",
+    await send_ui_text(
+        call.bot,
+        chat_id=call.from_user.id,
+        text=(
+            f"✅ Применена версия интерфейса: <b>{html_escape(profile.get('title'))}</b>.\n\n"
+            f"Панель управления обновлена пользователям: {refreshed}."
+        ),
         reply_markup=admin_updates_menu_keyboard(),
     )
     await call.answer("Интерфейс переключён")

@@ -9,6 +9,10 @@ from app.config import settings
 from app.states import AdminStates
 from app.keyboards.admin import (
     admin_menu,
+    admin_users_section_menu,
+    admin_tickets_section_menu,
+    admin_stats_section_menu,
+    admin_system_section_menu,
     admin_access_requests_menu,
     admin_users_menu,
     admin_tickets_menu,
@@ -30,6 +34,7 @@ from app.keyboards.admin import (
 from app.keyboards.common import main_menu_for_role
 from app.services.admin_notes import list_notes, get_note, create_note, update_note, delete_note
 from app.services.ui_messages import send_ui_text
+from app.services.ui_versions import pc_ticket_workspace_enabled
 from app.services.users import (
     get_user_by_telegram_id,
     get_access_requests,
@@ -315,12 +320,19 @@ async def send_admin_tickets_page(message_or_callback, ticket_filter: str = "all
     title = admin_tickets_title(ticket_filter)
 
     if not total:
-        target_message = message_or_callback.message if isinstance(message_or_callback, CallbackQuery) else message_or_callback
-
-        await target_message.answer(
-            f"{title}: список пуст.",
-            reply_markup=admin_tickets_menu()
-        )
+        if pc_ticket_workspace_enabled():
+            await send_ui_text(
+                message_or_callback.bot,
+                chat_id=message_or_callback.from_user.id,
+                text=f"{title}: список пуст.",
+                reply_markup=admin_tickets_menu(),
+            )
+        else:
+            target_message = message_or_callback.message if isinstance(message_or_callback, CallbackQuery) else message_or_callback
+            await target_message.answer(
+                f"{title}: список пуст.",
+                reply_markup=admin_tickets_menu(),
+            )
 
         if isinstance(message_or_callback, CallbackQuery):
             await message_or_callback.answer()
@@ -356,12 +368,19 @@ async def send_admin_tickets_page(message_or_callback, ticket_filter: str = "all
         page_size=ADMIN_TICKETS_PAGE_SIZE,
     )
 
-    target_message = message_or_callback.message if isinstance(message_or_callback, CallbackQuery) else message_or_callback
-
-    await target_message.answer(
-        text,
-        reply_markup=keyboard
-    )
+    if pc_ticket_workspace_enabled():
+        await send_ui_text(
+            message_or_callback.bot,
+            chat_id=message_or_callback.from_user.id,
+            text=text,
+            reply_markup=keyboard,
+        )
+    else:
+        target_message = message_or_callback.message if isinstance(message_or_callback, CallbackQuery) else message_or_callback
+        await target_message.answer(
+            text,
+            reply_markup=keyboard,
+        )
 
     if isinstance(message_or_callback, CallbackQuery):
         await message_or_callback.answer()
@@ -458,15 +477,75 @@ async def callback_admin_menu(callback: CallbackQuery):
     await callback.answer()
 
 
+@router.callback_query(F.data == "admin_section_users")
+async def callback_admin_section_users(callback: CallbackQuery):
+    if await deny_if_not_admin(callback):
+        return
+    await send_ui_text(
+        callback.bot,
+        chat_id=callback.from_user.id,
+        text="👥 <b>Пользователи и доступ</b>",
+        reply_markup=admin_users_section_menu(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_section_tickets")
+async def callback_admin_section_tickets(callback: CallbackQuery):
+    if await deny_if_not_admin(callback):
+        return
+    await send_ui_text(
+        callback.bot,
+        chat_id=callback.from_user.id,
+        text="🎫 <b>Тикеты и напоминания</b>",
+        reply_markup=admin_tickets_section_menu(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_section_stats")
+async def callback_admin_section_stats(callback: CallbackQuery):
+    if await deny_if_not_admin(callback):
+        return
+    await send_ui_text(
+        callback.bot,
+        chat_id=callback.from_user.id,
+        text="📊 <b>Статистика и экспорт</b>",
+        reply_markup=admin_stats_section_menu(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_section_system")
+async def callback_admin_section_system(callback: CallbackQuery):
+    if await deny_if_not_admin(callback):
+        return
+    await send_ui_text(
+        callback.bot,
+        chat_id=callback.from_user.id,
+        text="🔄 <b>Бот и обновления</b>",
+        reply_markup=admin_system_section_menu(),
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data == "admin_ticket_reminders")
 async def callback_admin_ticket_reminders(callback: CallbackQuery):
     if await deny_if_not_admin(callback):
         return
 
-    await callback.message.answer(
-        "🔔 <b>Напомнить о тикетах</b>\n\nВыбери подразделение:",
-        reply_markup=admin_ticket_reminder_departments_keyboard(),
-    )
+    if pc_ticket_workspace_enabled():
+        await send_ui_text(
+            callback.bot,
+            chat_id=callback.from_user.id,
+            text="🔔 <b>Напомнить о тикетах</b>\n\nВыбери подразделение:",
+            reply_markup=admin_ticket_reminder_departments_keyboard(),
+        )
+    else:
+        await callback.message.answer(
+            "🔔 <b>Напомнить о тикетах</b>\n\nВыбери подразделение:",
+            reply_markup=admin_ticket_reminder_departments_keyboard(),
+        )
     await callback.answer()
 
 
@@ -480,10 +559,18 @@ async def callback_admin_ticket_reminder_department(callback: CallbackQuery):
         await callback.answer("Неизвестное подразделение.", show_alert=True)
         return
 
-    await callback.message.answer(
-        f"Подразделение: <b>{department_title(department)}</b>\n\nВыбери категорию тикетов:",
-        reply_markup=admin_ticket_reminder_categories_keyboard(department),
-    )
+    if pc_ticket_workspace_enabled():
+        await send_ui_text(
+            callback.bot,
+            chat_id=callback.from_user.id,
+            text=f"Подразделение: <b>{department_title(department)}</b>\n\nВыбери категорию тикетов:",
+            reply_markup=admin_ticket_reminder_categories_keyboard(department),
+        )
+    else:
+        await callback.message.answer(
+            f"Подразделение: <b>{department_title(department)}</b>\n\nВыбери категорию тикетов:",
+            reply_markup=admin_ticket_reminder_categories_keyboard(department),
+        )
     await callback.answer()
 
 
@@ -602,11 +689,12 @@ async def callback_admin_access_requests(callback: CallbackQuery):
     if await deny_if_not_admin(callback):
         return
 
-    await callback.message.answer(
-        "👥 <b>Заявки на доступ</b>\n\nВыбери список:",
-        reply_markup=admin_access_requests_menu()
+    await send_ui_text(
+        callback.bot,
+        chat_id=callback.from_user.id,
+        text="👥 <b>Заявки на доступ</b>\n\nВыбери список:",
+        reply_markup=admin_access_requests_menu(),
     )
-
     await callback.answer()
 
 
@@ -741,11 +829,12 @@ async def callback_admin_users(callback: CallbackQuery):
     if await deny_if_not_admin(callback):
         return
 
-    await callback.message.answer(
-        "📋 <b>Пользователи</b>\n\nВыбери список:",
-        reply_markup=admin_users_menu()
+    await send_ui_text(
+        callback.bot,
+        chat_id=callback.from_user.id,
+        text="📋 <b>Пользователи</b>\n\nВыбери список:",
+        reply_markup=admin_users_menu(),
     )
-
     await callback.answer()
 
 
@@ -990,10 +1079,18 @@ async def callback_admin_tickets(callback: CallbackQuery):
     if await deny_if_not_admin(callback):
         return
 
-    await callback.message.answer(
-        "🎫 <b>Тикеты</b>\n\nВыбери список:",
-        reply_markup=admin_tickets_menu()
-    )
+    if pc_ticket_workspace_enabled():
+        await send_ui_text(
+            callback.bot,
+            chat_id=callback.from_user.id,
+            text="🎫 <b>Тикеты</b>\n\nВыбери список:",
+            reply_markup=admin_tickets_menu(),
+        )
+    else:
+        await callback.message.answer(
+            "🎫 <b>Тикеты</b>\n\nВыбери список:",
+            reply_markup=admin_tickets_menu(),
+        )
 
     await callback.answer()
 
@@ -1026,10 +1123,18 @@ async def callback_admin_ticket_open(callback: CallbackQuery):
         await callback.answer("Тикет не найден.", show_alert=True)
         return
 
-    await callback.message.answer(
-        format_admin_ticket_card(ticket),
-        reply_markup=admin_ticket_action_keyboard(ticket)
-    )
+    if pc_ticket_workspace_enabled():
+        await send_ui_text(
+            callback.bot,
+            chat_id=callback.from_user.id,
+            text=format_admin_ticket_card(ticket),
+            reply_markup=admin_ticket_action_keyboard(ticket),
+        )
+    else:
+        await callback.message.answer(
+            format_admin_ticket_card(ticket),
+            reply_markup=admin_ticket_action_keyboard(ticket),
+        )
 
     await callback.answer()
 
@@ -1176,9 +1281,11 @@ async def callback_main_menu(callback: CallbackQuery):
     user = await get_user_by_telegram_id(callback.from_user.id)
     is_admin = is_admin_user(callback.from_user.id)
 
-    await callback.message.answer(
-        "Главное меню:",
-        reply_markup=main_menu_for_role(user["role"], is_admin=is_admin) if user else None
+    await send_ui_text(
+        callback.bot,
+        chat_id=callback.from_user.id,
+        text="🏠 <b>Главное меню</b>\n\nВыбери действие:",
+        reply_markup=main_menu_for_role(user["role"], is_admin=is_admin) if user else None,
     )
 
     await callback.answer()
