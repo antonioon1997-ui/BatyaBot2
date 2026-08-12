@@ -16,7 +16,6 @@ from app.keyboards.order_status import (
 )
 from app.keyboards.tickets import post_create_options_keyboard
 from app.services.attachments import create_attachment
-from app.services.main_menu_dashboard import build_main_menu_text
 from app.services.order_status import (
     OrderStatusLookup,
     OrderStatusRecord,
@@ -126,11 +125,10 @@ async def _send_main_menu(target, state: FSMContext) -> None:
             await target.answer("Нет доступа.")
         return
 
-    menu_text = await build_main_menu_text(target.from_user.id, row_get(user, "role"))
     await send_ui_text(
         target.bot,
         chat_id=target.from_user.id,
-        text=menu_text,
+        text="🏠 <b>Главное меню</b>\n\nВыбери действие:",
         reply_markup=main_menu_for_role(row_get(user, "role"), is_admin=admin_flag),
     )
     if isinstance(target, CallbackQuery):

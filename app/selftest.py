@@ -129,7 +129,6 @@ async def run_selftest() -> None:
         pc_ticket_workspace_enabled,
     )
     from app.services.templates import create_response_template, get_response_templates, update_response_template
-    from app.services.main_menu_dashboard import build_main_menu_text
     from app.services.order_status import (
         build_order_status_index,
         build_purchasing_snapshot,
@@ -901,13 +900,6 @@ async def run_selftest() -> None:
         admin_inline_layout == expected_inline_layout + [["⚙️ Админка"]],
         "Админская inline-панель должна отличаться только четвёртым рядом «Админка»",
     )
-
-    dashboard_text = await build_main_menu_text(1001, "client")
-    _assert("📊 <b>Рабочая сводка</b>" in dashboard_text, "Главное меню не стало информационной панелью")
-    _assert("Клиентский отдел" in dashboard_text and "Закупка" in dashboard_text, "В сводке не показаны оба отдела")
-    _assert("не обработано" in dashboard_text, "В сводке нет счётчика необработанных тикетов")
-    _assert("Просрочено (не сегодня)" in dashboard_text, "В сводке нет тикетов старше текущего календарного дня")
-
     work_callbacks = {
         button.callback_data
         for row in ticket_work_menu_keyboard().inline_keyboard
