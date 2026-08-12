@@ -8,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app.domain import DEPARTMENT_CLIENT, DEPARTMENT_PURCHASING, department_by_role
-from app.keyboards.common import bottom_menu_for_role, main_menu_for_role
+from app.keyboards.common import main_menu_for_role
 from app.keyboards.order_status import (
     order_status_cancel_keyboard,
     order_status_result_keyboard,
@@ -23,7 +23,7 @@ from app.services.order_status import (
     extract_order_number_from_query,
     get_order_status,
 )
-from app.services.ui_messages import UiMessagePart, clear_ui_message_bundle, send_ui_parts, send_ui_text
+from app.services.ui_messages import clear_ui_message_bundle, delete_trigger_message, send_ui_text
 from app.services.tickets import (
     add_ticket_event,
     create_ticket,
@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 def _plain_snapshot(record: OrderStatusRecord | None, *, stale: bool = False) -> str:
     if record is None:
-        text = "Данные заказа не найдены в таблице активных заказов."
+        text = "Данные заказа не найдены в базе OrderExporter."
     else:
         lines = [
             f"Статус МС: {record.ms_status}",
@@ -79,7 +79,7 @@ def _lookup_text(record: OrderStatusRecord, *, purchasing: bool, stale: bool) ->
 
     if stale:
         text += (
-            "\n\n⚠️ <i>Google Таблица временно недоступна. "
+            "\n\n⚠️ <i>База OrderExporter давно не обновлялась. "
             "Показаны данные последнего успешного обновления.</i>"
         )
 
@@ -125,19 +125,11 @@ async def _send_main_menu(target, state: FSMContext) -> None:
             await target.answer("Нет доступа.")
         return
 
-    await send_ui_parts(
+    await send_ui_text(
         target.bot,
         chat_id=target.from_user.id,
-        parts=[
-            UiMessagePart(
-                "Главное меню.",
-                bottom_menu_for_role(row_get(user, "role"), is_admin=admin_flag),
-            ),
-            UiMessagePart(
-                "Выбери действие:",
-                main_menu_for_role(row_get(user, "role"), is_admin=admin_flag),
-            ),
-        ],
+        text="🏠 <b>Главное меню</b>\n\nВыбери действие:",
+        reply_markup=main_menu_for_role(row_get(user, "role"), is_admin=admin_flag),
     )
     if isinstance(target, CallbackQuery):
         await target.answer()
@@ -185,7 +177,7 @@ async def _lookup_and_send(message: Message, state: FSMContext, order_number: st
             message.bot,
             chat_id=message.from_user.id,
             text=(
-                "⚠️ Не удалось получить данные из Google Таблицы.\n\n"
+                "⚠️ Не удалось получить данные из базы OrderExporter.\n\n"
                 "Работа тикетов не нарушена. Повтори запрос через несколько секунд."
             ),
             reply_markup=order_status_unavailable_keyboard(),
@@ -199,12 +191,12 @@ async def _lookup_and_send(message: Message, state: FSMContext, order_number: st
         if lookup.stale:
             text = (
                 f"⚠️ Заказ <b>{html_escape(order_number)}</b> не найден в последней сохранённой копии данных.\n\n"
-                "Свежую таблицу сейчас получить не удалось, поэтому результат может быть устаревшим."
+                "Свежий снимок OrderExporter сейчас недоступен, поэтому результат может быть устаревшим."
             )
         else:
             text = (
-                f"Заказ <b>{html_escape(order_number)}</b> не найден в таблице активных заказов.\n\n"
-                "Проверь номер. Возможно, заказ уже закрыт и отсутствует в списке активных заказов."
+                f"Заказ <b>{html_escape(order_number)}</b> не найден в базе заказов.\n\n"
+                "Проверь номер заказа. Возможно, он ещё не попал в последний снимок OrderExporter."
             )
     else:
         text = _lookup_text(
@@ -252,6 +244,10 @@ async def process_order_number(message: Message, state: FSMContext):
         return
 
     await _lookup_and_send(message, state, order_number)
+    # В PC-first интерфейсе введённый номер — технический input, как и запрос
+    # в архиве. После успешного распознавания и отрисовки результата убираем
+    # его из истории чата, чтобы рабочая область не засорялась номерами.
+    await delete_trigger_message(message)
 
 
 @router.callback_query(F.data.startswith("order_status_ask:"))
@@ -276,7 +272,7 @@ async def callback_order_status_ask(call: CallbackQuery, state: FSMContext):
     try:
         lookup = await get_order_status(order_number)
     except OrderStatusUnavailable:
-        # Вопрос всё равно можно создать: отсутствие Google не должно блокировать тикеты.
+        # Вопрос всё равно можно создать: недоступность OrderExporter не должна блокировать тикеты.
         lookup = None
 
     snapshot = _plain_snapshot(
@@ -358,7 +354,7 @@ async def process_order_question(message: Message, state: FSMContext):
             ticket_id,
             "order_status_attached",
             actor_telegram_id=message.from_user.id,
-            details="К тикету приложен снимок статуса заказа из Google Sheets",
+            details="К тикету приложен снимок статуса заказа из OrderExporter",
         )
     except Exception:
         logger.exception("Не удалось создать вопрос по заказу %s", order_number)
@@ -385,7 +381,7 @@ async def process_order_question(message: Message, state: FSMContext):
 
     attachment_line = "📎 Есть вложение: 1 шт.\n" if attachment else ""
     author_name = row_get(user, "full_name") or row_get(user, "username") or message.from_user.id
-    snapshot_block = snapshot or "Данные заказа не найдены в таблице активных заказов."
+    snapshot_block = snapshot or "Данные заказа не найдены в базе OrderExporter."
     await notify_department_about_ticket(
         bot=message.bot,
         department=DEPARTMENT_PURCHASING,

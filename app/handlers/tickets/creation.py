@@ -7,6 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app.domain import DEPARTMENT_CLIENT, DEPARTMENT_PURCHASING
+from app.keyboards.common import main_menu_for_role
 from app.keyboards.productivity import duplicate_warning_keyboard
 from app.keyboards.tickets import (
     cancel_create_keyboard,
@@ -339,8 +340,19 @@ async def add_attachments_before_create(call: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "cancel_create_ticket")
 async def cancel_create_ticket_callback(call: CallbackQuery, state: FSMContext):
+    """Отмена создания возвращает пользователя в главное меню в том же UI-сообщении."""
     await state.clear()
-    await clear_ui_message_bundle(call.bot, chat_id=call.from_user.id)
+    user, admin_flag = await get_current_user_and_admin(call.from_user.id)
+    if not user:
+        await call.answer("Создание тикета отменено.", show_alert=False)
+        return
+
+    await send_ui_text(
+        call.bot,
+        chat_id=call.from_user.id,
+        text="🏠 <b>Главное меню</b>\n\nВыбери действие:",
+        reply_markup=main_menu_for_role(row_get(user, "role"), is_admin=admin_flag),
+    )
     await call.answer("Создание тикета отменено.")
 
 @router.callback_query(F.data == "noop")

@@ -1,7 +1,7 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
 from app.domain import department_by_role, is_observer_role, normalize_role
-from app.services.ui_versions import compact_main_menu_enabled, help_button_enabled
+from app.services.ui_versions import compact_main_menu_enabled, help_button_enabled, pc_ticket_workspace_enabled
 
 def row_get(row, key, default=None):
     if row is None:
@@ -55,11 +55,18 @@ def bottom_menu_for_role(role: str | None = None, is_admin: bool = False) -> Rep
         )
 
     if compact_main_menu_enabled():
+        # PC-first: ReplyKeyboard повторяет геометрию главного inline-меню.
         keyboard = [
             [KeyboardButton(text="➕ Создать тикет")],
-            [KeyboardButton(text="🔎 Узнать статус заказа")],
         ]
-        navigation_row = [KeyboardButton(text="📂 Работа с тикетами")]
+        if pc_ticket_workspace_enabled():
+            keyboard.append([
+                KeyboardButton(text="📂 Работа с тикетами"),
+                KeyboardButton(text="🔎 Узнать статус заказа"),
+            ])
+        else:
+            keyboard.append([KeyboardButton(text="🔎 Узнать статус заказа")])
+        navigation_row = [KeyboardButton(text="🏠 Меню")]
         if help_button_enabled():
             navigation_row.append(KeyboardButton(text="❓ Помощь"))
         keyboard.append(navigation_row)
@@ -146,14 +153,20 @@ def main_menu_for_role(role: str | None = None, is_admin: bool = False) -> Inlin
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     if compact_main_menu_enabled():
+        # Inline-панель — рабочее меню, поэтому не содержит кнопку «Меню»,
+        # которая в этом экране вела бы сама на себя. Постоянная ReplyKeyboard
+        # остаётся отдельным быстрым пультом и сохраняет прежнюю геометрию.
         keyboard = [
             [InlineKeyboardButton(text="➕ Создать тикет", callback_data="create_ticket")],
             [InlineKeyboardButton(text="🔎 Узнать статус заказа", callback_data="order_status_start")],
         ]
-        navigation_row = [InlineKeyboardButton(text="📂 Работа с тикетами", callback_data="ticket_work_menu")]
-        if help_button_enabled():
-            navigation_row.append(InlineKeyboardButton(text="❓ Помощь", callback_data="help_main"))
-        keyboard.append(navigation_row)
+        if pc_ticket_workspace_enabled():
+            work_row = [InlineKeyboardButton(text="📂 Работа с тикетами", callback_data="ticket_work_menu")]
+            if help_button_enabled():
+                work_row.append(InlineKeyboardButton(text="❓ Помощь", callback_data="help_main"))
+            keyboard.append(work_row)
+        elif help_button_enabled():
+            keyboard.append([InlineKeyboardButton(text="❓ Помощь", callback_data="help_main")])
     else:
         keyboard = [
             [InlineKeyboardButton(text="➕ Создать тикет", callback_data="create_ticket")],

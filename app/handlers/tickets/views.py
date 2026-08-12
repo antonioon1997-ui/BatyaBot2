@@ -19,6 +19,7 @@ from app.keyboards.tickets import (
     tickets_list_keyboard,
 )
 from app.services.attachments import get_ticket_attachments
+from app.services.main_menu_dashboard import build_main_menu_text
 from app.services.preferences import user_text
 from app.services.ticket_messages import delete_message_ids, replace_ticket_message_bundle, send_live_ticket_text
 from app.services.ui_messages import send_ui_text
@@ -55,11 +56,11 @@ async def show_main_menu(message_or_call, user=None, admin_flag: bool = False):
         user, admin_flag = await get_current_user_and_admin(telegram_id)
 
     telegram_id = int(message_or_call.from_user.id)
-    action_prompt = await user_text(telegram_id, "main_menu_title")
+    menu_text = await build_main_menu_text(telegram_id, row_get(user, "role"))
     await send_ui_text(
         message_or_call.bot,
         chat_id=telegram_id,
-        text=f"🏠 <b>Главное меню</b>\n\n{action_prompt}",
+        text=menu_text,
         reply_markup=main_menu_for_role(
             role=row_get(user, "role"),
             is_admin=admin_flag,

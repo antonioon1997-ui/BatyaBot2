@@ -18,6 +18,7 @@ from typing import Iterable
 from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter
 
 from app.config import settings
+from app.services.main_menu_dashboard import build_main_menu_text
 from app.utils import html_escape, moscow_now, moscow_now_iso
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -31,13 +32,17 @@ READY_FILE = RUNTIME_DIR / "ready.json"
 UPDATE_HISTORY_FILE = RUNTIME_DIR / "update_history.json"
 VERSION_FILE = PROJECT_ROOT / "VERSION"
 
-# Одноразовый технический hotfix 2.5: штатный внешний обновлятор всегда повышает
-# номер версии. Для этого исправления бот подтверждает запуск как 2.6, после чего
-# возвращает отображаемую/рабочую версию 2.5 и запоминает, что операция выполнена.
-HOTFIX_ID = "ui_screen_dedup_2_5"
-HOTFIX_TARGET_VERSION = "2.5"
-HOTFIX_INSTALLER_VERSION = "2.6"
-HOTFIX_STATE_FILE = RUNTIME_DIR / f"hotfix_{HOTFIX_ID}.json"
+# 2.6.0 переводит проект на SemVer x.y.z. Первый запуск после старого
+# обновлятора всё ещё подтверждается как 2.6, после чего VERSION атомарно
+# нормализуется в 2.6.0. Следующие обновления уже выполняет новый worker.
+SEMVER_STATE_FILE = RUNTIME_DIR / "semver_migration.json"
+EXTERNAL_UPDATER_SOURCE = Path(__file__).with_name("external_updater_worker.py")
+EXTERNAL_UPDATER_TARGET = Path(
+    os.getenv(
+        "BATYABOT_EXTERNAL_UPDATER",
+        "/usr/local/lib/batyabot2-updater/batyabot_updater.py",
+    )
+)
 
 MAX_ARCHIVE_SIZE = 30 * 1024 * 1024
 MAX_UNCOMPRESSED_SIZE = 80 * 1024 * 1024
@@ -76,9 +81,40 @@ def ensure_update_directories() -> None:
 def get_current_version() -> str:
     try:
         value = VERSION_FILE.read_text(encoding="utf-8").strip()
-        return value or "1.4"
+        return value or "1.4.0"
     except FileNotFoundError:
-        return "1.4"
+        return "1.4.0"
+
+
+def parse_version(version: str) -> tuple[int, int, int]:
+    try:
+        parts = [int(part) for part in str(version).strip().split(".")]
+        if len(parts) == 2:
+            parts.append(0)
+        if len(parts) != 3 or any(part < 0 for part in parts):
+            raise ValueError
+        return parts[0], parts[1], parts[2]
+    except Exception:
+        return 1, 4, 0
+
+
+def predict_next_version(version: str, bump: str = "patch") -> str:
+    major, minor, patch = parse_version(version)
+    bump = str(bump or "patch").strip().lower()
+    if bump == "major":
+        return f"{major + 1}.0.0"
+    if bump == "minor":
+        return f"{major}.{minor + 1}.0"
+    return f"{major}.{minor}.{patch + 1}"
+
+
+def _manifest_version_bump(manifest: dict) -> str:
+    value = str(manifest.get("version_bump") or "").strip().lower()
+    if value in {"major", "minor", "patch"}:
+        return value
+    if bool(manifest.get("major_update", False)):
+        return "major"
+    return "patch"
 
 
 def _is_allowed_project_path(path: PurePosixPath) -> bool:
@@ -137,6 +173,11 @@ def _read_manifest(path: Path) -> dict:
     major_update = manifest.get("major_update", False)
     if not isinstance(major_update, bool):
         raise ValueError("Поле major_update должно быть true или false")
+
+    version_bump = manifest.get("version_bump")
+    if version_bump is not None and str(version_bump).strip().lower() not in {"major", "minor", "patch"}:
+        raise ValueError("Поле version_bump должно быть major, minor или patch")
+    manifest["version_bump"] = _manifest_version_bump(manifest)
 
     delete = manifest.get("delete", [])
     if not isinstance(delete, list):
@@ -319,6 +360,7 @@ def write_pending_job(inspection: UpdateInspection, requested_by: int) -> None:
         "delete": inspection.delete_files,
         "release_notes": inspection.release_notes,
         "major_update": bool(inspection.manifest.get("major_update", False)),
+        "version_bump": _manifest_version_bump(inspection.manifest),
         "current_version": get_current_version(),
     }
     tmp = JOB_FILE.with_suffix(".tmp")
@@ -349,48 +391,68 @@ async def start_external_updater() -> tuple[bool, str]:
     return True, "Обновлятор запущен"
 
 
-def _read_hotfix_state() -> dict:
+def _read_semver_state() -> dict:
     try:
-        payload = json.loads(HOTFIX_STATE_FILE.read_text(encoding="utf-8"))
+        payload = json.loads(SEMVER_STATE_FILE.read_text(encoding="utf-8"))
         return payload if isinstance(payload, dict) else {}
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
 
 
-def _write_hotfix_state(payload: dict) -> None:
+def _write_semver_state(payload: dict) -> None:
     ensure_update_directories()
-    tmp = HOTFIX_STATE_FILE.with_suffix(".tmp")
+    tmp = SEMVER_STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, HOTFIX_STATE_FILE)
+    os.replace(tmp, SEMVER_STATE_FILE)
 
 
-def _version_preserving_hotfix_requested() -> bool:
+def ensure_external_updater_worker() -> bool:
+    """Синхронизирует root-worker обновлений с SemVer-версией из проекта."""
     try:
-        job = json.loads(JOB_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        source = EXTERNAL_UPDATER_SOURCE.read_bytes()
+        if not source:
+            raise RuntimeError("Шаблон внешнего обновлятора пуст")
+        # Проверяем синтаксис до замены рабочего worker.
+        compile(source.decode("utf-8"), str(EXTERNAL_UPDATER_SOURCE), "exec")
+        try:
+            if EXTERNAL_UPDATER_TARGET.read_bytes() == source:
+                return False
+        except FileNotFoundError:
+            pass
+
+        EXTERNAL_UPDATER_TARGET.parent.mkdir(parents=True, exist_ok=True)
+        if EXTERNAL_UPDATER_TARGET.exists():
+            backup = EXTERNAL_UPDATER_TARGET.with_suffix(".pre_semver.bak")
+            if not backup.exists():
+                shutil.copy2(EXTERNAL_UPDATER_TARGET, backup)
+        tmp = EXTERNAL_UPDATER_TARGET.with_suffix(".tmp")
+        tmp.write_bytes(source)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, EXTERNAL_UPDATER_TARGET)
+        return True
+    except Exception:
+        # Ошибка миграции worker не должна мешать текущему запуску бота,
+        # но будет видна в журнале systemd. Следующее обновление без worker
+        # запускать не следует.
+        import logging
+        logging.getLogger(__name__).exception("Не удалось установить SemVer-worker обновлятора")
         return False
-    notes = job.get("release_notes", []) if isinstance(job, dict) else []
-    return any(
-        "Номер версии сохраняется 2.5" in str(note)
-        for note in notes
-    )
 
 
-def _preserve_hotfix_version(started_version: str) -> None:
-    if (
-        started_version != HOTFIX_INSTALLER_VERSION
-        or not _version_preserving_hotfix_requested()
-    ):
-        return
+def _normalize_started_version(started_version: str) -> str:
+    parts = str(started_version).strip().split(".")
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        return started_version
 
-    _write_hotfix_state({
-        "id": HOTFIX_ID,
+    normalized = f"{int(parts[0])}.{int(parts[1])}.0"
+    _write_semver_state({
         "installer_version": started_version,
-        "target_version": HOTFIX_TARGET_VERSION,
+        "normalized_version": normalized,
         "completed": False,
         "created_at": moscow_now_iso(timespec="seconds"),
     })
-    VERSION_FILE.write_text(HOTFIX_TARGET_VERSION + "\n", encoding="utf-8")
+    VERSION_FILE.write_text(normalized + "\n", encoding="utf-8")
+    return normalized
 
 
 def mark_runtime_ready() -> None:
@@ -405,9 +467,9 @@ def mark_runtime_ready() -> None:
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, READY_FILE)
 
-    # READY_FILE уже содержит 2.6, поэтому внешний обновлятор подтвердит успешный
-    # запуск. После этого оставляем пользовательскую версию на 2.5.
-    _preserve_hotfix_version(started_version)
+    # Старый updater, устанавливающий именно 2.6.0, ожидает READY=2.6.
+    # После подтверждения готовности рабочий VERSION уже становится 2.6.0.
+    _normalize_started_version(started_version)
 
 
 async def _send_update_message_with_retry(
@@ -524,15 +586,15 @@ async def deployment_result_watcher(bot) -> None:
             payload = json.loads(RESULT_FILE.read_text(encoding="utf-8"))
             status = payload.get("status")
 
-            hotfix_state = _read_hotfix_state()
+            semver_state = _read_semver_state()
             if (
                 status == "success"
-                and not hotfix_state.get("completed")
-                and str(payload.get("version")) == str(hotfix_state.get("installer_version"))
-                and hotfix_state.get("target_version")
+                and not semver_state.get("completed")
+                and str(payload.get("version")) == str(semver_state.get("installer_version"))
+                and semver_state.get("normalized_version")
             ):
-                payload["version"] = str(hotfix_state["target_version"])
-                payload["version_preserved"] = True
+                payload["version"] = str(semver_state["normalized_version"])
+                payload["version_normalized"] = True
                 _rewrite_result_payload(payload)
 
             version = payload.get("version", get_current_version())
@@ -572,6 +634,21 @@ async def deployment_result_watcher(bot) -> None:
             primary_admin_id = int(settings.admin_id)
 
             if status == "success":
+                if not payload.get("semver_worker_installed"):
+                    ensure_external_updater_worker()
+                    try:
+                        worker_ok = (
+                            EXTERNAL_UPDATER_TARGET.read_bytes()
+                            == EXTERNAL_UPDATER_SOURCE.read_bytes()
+                        )
+                    except OSError:
+                        worker_ok = False
+                    if worker_ok:
+                        payload["semver_worker_installed"] = True
+                        _rewrite_result_payload(payload)
+                    else:
+                        logger.error("SemVer-worker обновлятора не установлен; следующее обновление требует проверки")
+
                 if not payload.get("history_recorded"):
                     _append_successful_update_history(payload)
                     payload["history_recorded"] = True
@@ -607,7 +684,8 @@ async def deployment_result_watcher(bot) -> None:
                 _rewrite_result_payload(payload)
 
             from app.domain import department_by_role
-            from app.keyboards.common import bottom_menu_for_role
+            from app.keyboards.common import bottom_menu_for_role, main_menu_for_role
+            from app.services.ui_messages import send_ui_text
             from app.services.users import get_active_users
 
             users = await get_active_users()
@@ -627,28 +705,26 @@ async def deployment_result_watcher(bot) -> None:
                 if status == "success":
                     if telegram_id in admin_set:
                         role_user_text = (
-                            "🔄 <b>Меню обновлено автоматически</b>\n\n"
+                            "🔄 <b>Панель управления обновлена автоматически</b>\n\n"
                             "Новые кнопки уже загружены. Можно продолжать работу.\n\n"
-                            "Если Telegram по какой-то причине оставил старое меню, "
-                            "введите в поле для ввода команду /start."
+                            "Нижнее быстрое меню сохранено. Если inline-панель потерялась, нажмите «🏠 Меню» или используйте /menu."
                         )
                     else:
                         role_user_text = (
                             "✅ <b>Техническое обслуживание завершено</b>\n\n"
                             f"Бот обновлён до версии <b>{version}</b> и снова готов к работе.\n"
-                            "Меню обновлено автоматически — можно продолжать работу."
+                            "Панель управления обновлена автоматически — можно продолжать работу."
                         )
                         if user_notes_text:
                             role_user_text += f"\n\n<b>Что изменилось:</b>\n{user_notes_text}"
                         role_user_text += (
-                            "\n\nЕсли Telegram по какой-то причине оставил старое меню, "
-                            "введите в поле для ввода команду /start."
+                            "\n\nНижнее быстрое меню сохранено. Если inline-панель потерялась, нажмите «🏠 Меню» или используйте /menu."
                         )
                 else:
                     role_user_text = (
                         "✅ <b>Техническое обслуживание завершено</b>\n\n"
                         "Обновление было отменено, восстановлена предыдущая рабочая версия. "
-                        "Меню восстановлено автоматически — ботом снова можно пользоваться."
+                        "Панель управления восстановлена автоматически — ботом снова можно пользоваться."
                     )
 
                 delivered = await _send_update_message_with_retry(
@@ -667,6 +743,21 @@ async def deployment_result_watcher(bot) -> None:
                     _rewrite_result_payload(payload)
                     continue
 
+                if status == "success":
+                    try:
+                        menu_text = await build_main_menu_text(telegram_id, user["role"])
+                        await send_ui_text(
+                            bot,
+                            chat_id=telegram_id,
+                            text=menu_text,
+                            reply_markup=main_menu_for_role(
+                                user["role"],
+                                is_admin=telegram_id == primary_admin_id,
+                            ),
+                        )
+                    except Exception:
+                        logger.exception("Не удалось автоматически открыть inline-меню пользователя %s", telegram_id)
+
                 notified_users.add(telegram_id)
                 payload["notified_users"] = sorted(notified_users)
                 _rewrite_result_payload(payload)
@@ -684,10 +775,10 @@ async def deployment_result_watcher(bot) -> None:
                 payload["failed_users_reported"] = True
                 _rewrite_result_payload(payload)
 
-            if status == "success" and hotfix_state and not hotfix_state.get("completed"):
-                hotfix_state["completed"] = True
-                hotfix_state["completed_at"] = moscow_now_iso(timespec="seconds")
-                _write_hotfix_state(hotfix_state)
+            if status == "success" and semver_state and not semver_state.get("completed"):
+                semver_state["completed"] = True
+                semver_state["completed_at"] = moscow_now_iso(timespec="seconds")
+                _write_semver_state(semver_state)
 
             RESULT_FILE.unlink(missing_ok=True)
         except Exception:

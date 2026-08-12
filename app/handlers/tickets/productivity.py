@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app.domain import DEPARTMENT_PURCHASING, OPEN_STATUSES, department_by_role, normalize_department
-from app.keyboards.tickets import ticket_notification_keyboard
+from app.keyboards.tickets import active_search_prompt_keyboard, active_search_results_keyboard, ticket_notification_keyboard
 from app.keyboards.productivity import (
     assignment_candidates_keyboard,
     day_off_keyboard,
@@ -20,6 +20,9 @@ from app.keyboards.productivity import (
     work_hub_keyboard,
 )
 from app.services.ticket_messages import send_live_ticket_text
+from app.services.ui_context import get_ui_context, set_ticket_list_context, set_ui_context
+from app.services.ui_messages import delete_trigger_message, is_primary_ui_message, send_ui_text
+from app.services.ui_versions import pc_ticket_workspace_enabled
 from app.services.tickets import get_ticket_by_id, get_active_users_by_department
 from app.services.users import get_user_by_telegram_id
 from app.services.work_management import (
@@ -55,6 +58,7 @@ from .utils import (
     row_get,
 )
 from .views import send_ticket_card, send_tickets_list
+from .workspace import show_ticket_workspace, show_workspace_ticket
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -78,6 +82,30 @@ def _can_snooze(ticket, user, is_admin: bool) -> bool:
     )
 
 
+async def _is_workspace_call(call: CallbackQuery) -> bool:
+    return bool(
+        pc_ticket_workspace_enabled()
+        and await is_primary_ui_message(call.from_user.id, getattr(call.message, "message_id", None))
+    )
+
+
+async def _return_workspace_list(target) -> None:
+    context = await get_ui_context(target.from_user.id)
+    list_type = context.list_type or "incoming"
+    if list_type in {"active_search", "archive_search"}:
+        # Поисковые результаты восстанавливают собственные handlers; после
+        # отложения безопаснее вернуть пользователя в основной список.
+        list_type = "incoming"
+    await show_ticket_workspace(
+        target,
+        list_type=list_type,
+        page=context.page,
+        filters=context.filters_dict,
+        mode="normal",
+        answer_callback=False,
+    )
+
+
 async def _show_work_hub(target, user, is_admin: bool):
     department = department_by_role(row_get(user, "role")) if user else None
     count = await count_unread_active_tickets(target.from_user.id, department, is_admin=is_admin)
@@ -85,11 +113,14 @@ async def _show_work_hub(target, user, is_admin: bool):
         "📌 <b>Моя работа</b>\n\n"
         "Здесь собраны личные назначения, общие тикеты отдела, непрочитанные изменения, поиск и отметка выходных."
     )
+    await send_ui_text(
+        target.bot,
+        chat_id=target.from_user.id,
+        text=text,
+        reply_markup=work_hub_keyboard(count),
+    )
     if isinstance(target, CallbackQuery):
-        await target.message.answer(text, reply_markup=work_hub_keyboard(count))
         await target.answer()
-    else:
-        await target.answer(text, reply_markup=work_hub_keyboard(count))
 
 
 @router.message(F.text == "📌 Моя работа")
@@ -116,6 +147,9 @@ async def callback_assigned_tickets(call: CallbackQuery):
     if not user:
         await call.answer("Нет доступа.", show_alert=True)
         return
+    if pc_ticket_workspace_enabled():
+        await show_ticket_workspace(call, list_type="assigned", page=0, filters={})
+        return
     tickets = await get_assigned_tickets(call.from_user.id)
     await send_tickets_list(call, "👤 Назначенные мне", tickets)
 
@@ -126,6 +160,9 @@ async def callback_common_tickets(call: CallbackQuery):
     department = department_by_role(row_get(user, "role")) if user else None
     if not user or not department:
         await call.answer("Раздел доступен сотрудникам отделов.", show_alert=True)
+        return
+    if pc_ticket_workspace_enabled():
+        await show_ticket_workspace(call, list_type="common", page=0, filters={})
         return
     tickets = await get_common_tickets(call.from_user.id, department)
     await send_tickets_list(call, "📋 Общие тикеты отдела", tickets)
@@ -138,6 +175,9 @@ async def callback_unread_tickets(call: CallbackQuery):
         await call.answer("Нет доступа.", show_alert=True)
         return
     department = department_by_role(row_get(user, "role"))
+    if pc_ticket_workspace_enabled():
+        await show_ticket_workspace(call, list_type="unread", page=0, filters={})
+        return
     tickets = await get_unread_active_tickets(call.from_user.id, department, is_admin=is_admin)
     await send_tickets_list(call, "🔔 Непрочитанные изменения", tickets)
 
@@ -150,10 +190,75 @@ async def callback_active_search(call: CallbackQuery, state: FSMContext):
         return
     await state.clear()
     await state.set_state(ProductivityStates.waiting_active_search)
-    await call.message.answer(
-        "🔎 Введи номер тикета, номер заказа или слово из описания/комментариев активного тикета."
-    )
+    text = "🔎 <b>Поиск активных тикетов</b>\n\nВведи номер тикета, номер заказа или слово из описания/комментариев."
+    if pc_ticket_workspace_enabled():
+        await set_ui_context(call.from_user.id, view="active_search_prompt", return_view="ticket_list")
+        await send_ui_text(
+            call.bot,
+            chat_id=call.from_user.id,
+            text=text,
+            reply_markup=active_search_prompt_keyboard(),
+        )
+    else:
+        await call.message.answer(text)
     await call.answer()
+
+
+async def _show_active_search_results(target, query: str, *, page: int = 0, answer_callback: bool = True):
+    user, is_admin = await get_current_user_and_admin(target.from_user.id)
+    if not user:
+        if isinstance(target, CallbackQuery):
+            await target.answer("Нет доступа.", show_alert=True)
+        else:
+            await target.answer("Нет доступа.")
+        return
+    tickets = list(await search_active_tickets(
+        query,
+        target.from_user.id,
+        department_by_role(row_get(user, "role")),
+        is_admin=is_admin,
+        limit=200,
+    ))
+    page_size = 5
+    total = len(tickets)
+    total_pages = max((total + page_size - 1) // page_size, 1)
+    page = max(0, min(int(page), total_pages - 1))
+    start = page * page_size
+    page_tickets = tickets[start:start + page_size]
+    await set_ticket_list_context(
+        target.from_user.id,
+        list_type="active_search",
+        page=page,
+        queue_ids=[int(row_get(ticket, "id")) for ticket in tickets],
+        search_query=query,
+        mode="normal",
+        return_view="ticket_list",
+    )
+    if not tickets:
+        text = f"🔎 По запросу «{html_escape(query)}» активных тикетов не найдено."
+    else:
+        lines = [
+            "🔎 <b>Поиск активных тикетов</b>",
+            f"Запрос: <code>{html_escape(query)}</code> · найдено {total}",
+            "",
+        ]
+        for ticket in page_tickets:
+            order = row_get(ticket, "order_number")
+            order_part = f" · Заказ {html_escape(order)}" if order not in (None, "") else ""
+            lines.append(
+                f"<b>#{row_get(ticket, 'id')}</b>{order_part}\n"
+                f"{html_escape(str(row_get(ticket, 'description') or '')[:110])}"
+            )
+        lines.extend(["", f"Показано {start + 1}–{min(start + page_size, total)} из {total}"])
+        text = "\n\n".join(lines)
+    await send_ui_text(
+        target.bot,
+        chat_id=target.from_user.id,
+        text=text,
+        reply_markup=active_search_results_keyboard(tickets, page=page, page_size=page_size),
+    )
+    if answer_callback and isinstance(target, CallbackQuery):
+        await target.answer()
 
 
 @router.message(ProductivityStates.waiting_active_search)
@@ -167,6 +272,11 @@ async def process_active_search(message: Message, state: FSMContext):
         await message.answer("Нет доступа.")
         return
     query = message.text.strip()
+    if pc_ticket_workspace_enabled():
+        await _show_active_search_results(message, query, page=0)
+        await state.clear()
+        await delete_trigger_message(message)
+        return
     tickets = await search_active_tickets(
         query,
         message.from_user.id,
@@ -175,6 +285,31 @@ async def process_active_search(message: Message, state: FSMContext):
     )
     await state.clear()
     await send_tickets_list(message, f"🔎 Поиск: {html_escape(query)}", tickets)
+
+
+@router.callback_query(F.data.startswith("active_search_page:"))
+async def callback_active_search_page(call: CallbackQuery):
+    try:
+        page = int(call.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await call.answer("Некорректная страница.", show_alert=True)
+        return
+    context = await get_ui_context(call.from_user.id)
+    query = str(context.search_query or "").strip()
+    if not query:
+        await call.answer("Поиск устарел. Начни новый поиск.", show_alert=True)
+        return
+    await _show_active_search_results(call, query, page=page)
+
+
+@router.callback_query(F.data == "active_search_return")
+async def callback_active_search_return(call: CallbackQuery):
+    context = await get_ui_context(call.from_user.id)
+    query = str(context.search_query or "").strip()
+    if not query:
+        await call.answer("Поиск устарел.", show_alert=True)
+        return
+    await _show_active_search_results(call, query, page=context.page)
 
 
 @router.callback_query(F.data == "day_off_menu")
@@ -266,6 +401,10 @@ async def callback_assign_self(call: CallbackQuery):
         await call.answer("Тикет уже успел взять другой сотрудник.", show_alert=True)
         return
     updated = await get_ticket_by_id(ticket_id)
+    if await _is_workspace_call(call):
+        await show_workspace_ticket(call, ticket_id, answer_callback=False)
+        await call.answer("Тикет назначен тебе.")
+        return
     await call.message.answer(f"👤 Тикет #{ticket_id} назначен тебе.")
     await send_ticket_card(call, updated, user, False)
 
@@ -279,10 +418,12 @@ async def callback_transfer_menu(call: CallbackQuery):
         await call.answer("Передать тикет может текущий исполнитель.", show_alert=True)
         return
     users = await get_assignment_candidates(row_get(ticket, "executor_department"), exclude_user_id=call.from_user.id)
-    await call.message.answer(
-        f"Выбери нового исполнителя тикета #{ticket_id}:",
-        reply_markup=assignment_candidates_keyboard(ticket_id, users, prefix="ticket_transfer_to", allow_common=True),
-    )
+    text = f"🔄 <b>Передача тикета #{ticket_id}</b>\n\nВыбери нового исполнителя:"
+    keyboard = assignment_candidates_keyboard(ticket_id, users, prefix="ticket_transfer_to", allow_common=True)
+    if await _is_workspace_call(call):
+        await send_ui_text(call.bot, chat_id=call.from_user.id, text=text, reply_markup=keyboard)
+    else:
+        await call.message.answer(text, reply_markup=keyboard)
     await call.answer()
 
 
@@ -313,6 +454,10 @@ async def callback_transfer_to(call: CallbackQuery):
             )
         except Exception:
             logger.exception("Не удалось уведомить нового исполнителя %s", target)
+    if await _is_workspace_call(call):
+        await show_workspace_ticket(call, ticket_id, answer_callback=False)
+        await call.answer("Исполнитель изменён.")
+        return
     await call.message.answer(f"✅ Исполнитель тикета #{ticket_id} изменён.")
     await call.answer()
 
@@ -382,10 +527,12 @@ async def callback_admin_assign_menu(call: CallbackQuery):
         await call.answer("Тикет недоступен.", show_alert=True)
         return
     users = await get_assignment_candidates(row_get(ticket, "executor_department"))
-    await call.message.answer(
-        f"Принудительное назначение тикета #{ticket_id}:",
-        reply_markup=assignment_candidates_keyboard(ticket_id, users, prefix="admin_ticket_assign_to", allow_common=True),
-    )
+    text = f"👤 <b>Назначение тикета #{ticket_id}</b>\n\nВыбери исполнителя:"
+    keyboard = assignment_candidates_keyboard(ticket_id, users, prefix="admin_ticket_assign_to", allow_common=True)
+    if await _is_workspace_call(call):
+        await send_ui_text(call.bot, chat_id=call.from_user.id, text=text, reply_markup=keyboard)
+    else:
+        await call.message.answer(text, reply_markup=keyboard)
     await call.answer()
 
 
@@ -415,6 +562,10 @@ async def callback_admin_assign_to(call: CallbackQuery):
             )
         except Exception:
             logger.exception("Не удалось уведомить назначенного пользователя %s", target)
+    if await _is_workspace_call(call):
+        await show_workspace_ticket(call, ticket_id, answer_callback=False)
+        await call.answer("Назначение обновлено.")
+        return
     await call.message.answer(f"✅ Назначение тикета #{ticket_id} обновлено.")
     await call.answer()
 
@@ -429,11 +580,15 @@ async def callback_ticket_summary_menu(call: CallbackQuery):
         return
     current = html_escape(row_get(ticket, "current_summary"), default="—")
     next_action = html_escape(row_get(ticket, "next_action"), default="—")
-    await call.message.answer(
+    text = (
         f"📝 <b>Рабочая сводка тикета #{ticket_id}</b>\n\n"
-        f"Текущий итог:\n{current}\n\nСледующее действие:\n{next_action}",
-        reply_markup=ticket_summary_keyboard(ticket_id, bool(row_get(ticket, "current_summary") or row_get(ticket, "next_action"))),
+        f"Текущий итог:\n{current}\n\nСледующее действие:\n{next_action}"
     )
+    keyboard = ticket_summary_keyboard(ticket_id, bool(row_get(ticket, "current_summary") or row_get(ticket, "next_action")))
+    if await _is_workspace_call(call):
+        await send_ui_text(call.bot, chat_id=call.from_user.id, text=text, reply_markup=keyboard)
+    else:
+        await call.message.answer(text, reply_markup=keyboard)
     await call.answer()
 
 
@@ -446,15 +601,19 @@ async def callback_ticket_summary_set(call: CallbackQuery, state: FSMContext):
     if not _can_manage_summary(ticket, user, is_admin):
         await call.answer("Нет доступа.", show_alert=True)
         return
+    workspace_source = await _is_workspace_call(call)
     await state.clear()
-    await state.update_data(ticket_id=ticket_id)
+    await state.update_data(ticket_id=ticket_id, entry_source="workspace" if workspace_source else "legacy")
     if field == "summary":
         await state.set_state(ProductivityStates.waiting_summary)
-        prompt = "Напиши краткий текущий итог тикета одним сообщением."
+        prompt = "📝 <b>Текущий итог</b>\n\nНапиши краткий текущий итог тикета одним сообщением."
     else:
         await state.set_state(ProductivityStates.waiting_next_action)
-        prompt = "Напиши следующее действие по тикету одним сообщением."
-    await call.message.answer(prompt)
+        prompt = "➡️ <b>Следующее действие</b>\n\nНапиши следующее действие по тикету одним сообщением."
+    if workspace_source:
+        await send_ui_text(call.bot, chat_id=call.from_user.id, text=prompt)
+    else:
+        await call.message.answer(prompt)
     await call.answer()
 
 
@@ -471,9 +630,14 @@ async def process_ticket_summary(message: Message, state: FSMContext):
         await state.clear()
         await message.answer("Доступ изменился; итог не сохранён.")
         return
+    workspace_source = str(data.get("entry_source") or "legacy") == "workspace" and pc_ticket_workspace_enabled()
     await set_ticket_summary(ticket_id, message.from_user.id, current_summary=message.text.strip()[:1500])
     await state.clear()
-    await message.answer(f"✅ Краткий итог тикета #{ticket_id} обновлён.")
+    if workspace_source:
+        await delete_trigger_message(message)
+        await show_workspace_ticket(message, ticket_id, answer_callback=False)
+    else:
+        await message.answer(f"✅ Краткий итог тикета #{ticket_id} обновлён.")
 
 
 @router.message(ProductivityStates.waiting_next_action)
@@ -489,9 +653,14 @@ async def process_ticket_next_action(message: Message, state: FSMContext):
         await state.clear()
         await message.answer("Доступ изменился; действие не сохранено.")
         return
+    workspace_source = str(data.get("entry_source") or "legacy") == "workspace" and pc_ticket_workspace_enabled()
     await set_ticket_summary(ticket_id, message.from_user.id, next_action=message.text.strip()[:1500])
     await state.clear()
-    await message.answer(f"✅ Следующее действие тикета #{ticket_id} обновлено.")
+    if workspace_source:
+        await delete_trigger_message(message)
+        await show_workspace_ticket(message, ticket_id, answer_callback=False)
+    else:
+        await message.answer(f"✅ Следующее действие тикета #{ticket_id} обновлено.")
 
 
 @router.callback_query(F.data.startswith("ticket_summary_clear:"))
@@ -503,6 +672,8 @@ async def callback_ticket_summary_clear(call: CallbackQuery):
         await call.answer("Нет доступа.", show_alert=True)
         return
     await set_ticket_summary(ticket_id, call.from_user.id, clear=True)
+    if await _is_workspace_call(call):
+        await show_workspace_ticket(call, ticket_id, answer_callback=False)
     await call.answer("Поля очищены.")
 
 
@@ -514,10 +685,12 @@ async def callback_ticket_snooze_menu(call: CallbackQuery):
     if not _can_snooze(ticket, user, is_admin):
         await call.answer("Отложить тикет может отдел закупки или администратор.", show_alert=True)
         return
-    await call.message.answer(
-        f"⏰ Отложить тикет #{ticket_id}. Пока срок не наступит, он скрывается из рабочих списков закупки.",
-        reply_markup=snooze_keyboard(ticket_id, bool(row_get(ticket, "snoozed_until"))),
-    )
+    text = f"⏰ <b>Отложить тикет #{ticket_id}</b>\n\nПока срок не наступит, он скрывается из рабочих списков закупки."
+    keyboard = snooze_keyboard(ticket_id, bool(row_get(ticket, "snoozed_until")))
+    if await _is_workspace_call(call):
+        await send_ui_text(call.bot, chat_id=call.from_user.id, text=text, reply_markup=keyboard)
+    else:
+        await call.message.answer(text, reply_markup=keyboard)
     await call.answer()
 
 
@@ -535,6 +708,10 @@ async def callback_ticket_snooze_quick(call: CallbackQuery):
     if not changed:
         await call.answer("Не удалось отложить тикет.", show_alert=True)
         return
+    if await _is_workspace_call(call):
+        await _return_workspace_list(call)
+        await call.answer(f"Тикет отложен до {until.strftime('%d.%m %H:%M')}.")
+        return
     await call.message.answer(f"⏰ Тикет #{ticket_id} отложен до <b>{until.strftime('%d.%m.%Y %H:%M МСК')}</b>.")
     await call.answer()
 
@@ -547,10 +724,15 @@ async def callback_ticket_snooze_custom(call: CallbackQuery, state: FSMContext):
     if not _can_snooze(ticket, user, is_admin):
         await call.answer("Нет доступа.", show_alert=True)
         return
+    workspace_source = await _is_workspace_call(call)
     await state.clear()
     await state.set_state(ProductivityStates.waiting_snooze_datetime)
-    await state.update_data(ticket_id=ticket_id)
-    await call.message.answer("Введи дату и время по МСК, например: <code>30.07.2026 10:00</code> или <code>30.07 10:00</code>.")
+    await state.update_data(ticket_id=ticket_id, entry_source="workspace" if workspace_source else "legacy")
+    prompt = "⏰ Введи дату и время по МСК, например: <code>30.07.2026 10:00</code> или <code>30.07 10:00</code>."
+    if workspace_source:
+        await send_ui_text(call.bot, chat_id=call.from_user.id, text=prompt)
+    else:
+        await call.message.answer(prompt)
     await call.answer()
 
 
@@ -571,9 +753,14 @@ async def process_ticket_snooze_custom(message: Message, state: FSMContext):
         await state.clear()
         await message.answer("Доступ изменился; тикет не отложен.")
         return
+    workspace_source = str(data.get("entry_source") or "legacy") == "workspace" and pc_ticket_workspace_enabled()
     await snooze_ticket(ticket_id, message.from_user.id, until)
     await state.clear()
-    await message.answer(f"⏰ Тикет #{ticket_id} отложен до <b>{until.strftime('%d.%m.%Y %H:%M МСК')}</b>.")
+    if workspace_source:
+        await delete_trigger_message(message)
+        await _return_workspace_list(message)
+    else:
+        await message.answer(f"⏰ Тикет #{ticket_id} отложен до <b>{until.strftime('%d.%m.%Y %H:%M МСК')}</b>.")
 
 
 @router.callback_query(F.data.startswith("ticket_snooze_clear:"))

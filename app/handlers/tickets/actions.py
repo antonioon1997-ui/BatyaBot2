@@ -14,6 +14,8 @@ from app.services.tickets import (
     update_ticket_status,
 )
 from app.states import TicketActionStates
+from app.services.ui_messages import delete_trigger_message, is_primary_ui_message, send_ui_text
+from app.services.ui_versions import pc_ticket_workspace_enabled
 from app.utils import html_escape
 
 from .utils import (
@@ -32,8 +34,16 @@ from .utils import (
     row_get,
 )
 from .views import send_completed_ticket_card_to_creator, send_ticket_card
+from .workspace import show_workspace_ticket
 
 router = Router()
+
+
+async def _is_workspace_call(call: CallbackQuery) -> bool:
+    return bool(
+        pc_ticket_workspace_enabled()
+        and await is_primary_ui_message(call.from_user.id, getattr(call.message, "message_id", None))
+    )
 
 
 @router.callback_query(F.data.startswith("ticket_open:"))
@@ -49,6 +59,10 @@ async def open_ticket_callback(call: CallbackQuery):
 
     if not can_user_view_ticket(ticket, user, admin_flag):
         await call.answer("Нет доступа к этому тикету.", show_alert=True)
+        return
+
+    if await _is_workspace_call(call):
+        await show_workspace_ticket(call, ticket_id)
         return
 
     await send_ticket_card(call, ticket, user, admin_flag)
@@ -109,13 +123,28 @@ async def ticket_comment_callback(call: CallbackQuery, state: FSMContext):
 
 async def _start_comment_entry(call: CallbackQuery, state: FSMContext, ticket, user, *, close_after_comment: bool):
     ticket_id = int(ticket["id"])
+    workspace_source = await _is_workspace_call(call)
     await state.clear()
-    await state.update_data(ticket_id=ticket_id, close_after_comment=close_after_comment)
+    await state.update_data(
+        ticket_id=ticket_id,
+        close_after_comment=close_after_comment,
+        entry_source="workspace" if workspace_source else "legacy",
+    )
     await state.set_state(TicketActionStates.waiting_comment)
-    await call.message.answer(
-        f"Напиши {'ответ' if close_after_comment else 'комментарий'} к тикету #{ticket_id} одним сообщением."
+
+    prompt = (
+        f"✍️ <b>Ответ на тикет #{ticket_id}</b>\n\n"
+        "Напиши ответ одним сообщением."
         + (" После отправки тикет будет выполнен." if close_after_comment else "")
     )
+    if workspace_source:
+        await send_ui_text(
+            call.bot,
+            chat_id=call.from_user.id,
+            text=prompt,
+        )
+    else:
+        await call.message.answer(prompt)
     await call.answer()
 
 
@@ -123,6 +152,8 @@ async def _submit_comment_text(target, state: FSMContext, comment_text: str):
     data = await state.get_data()
     ticket_id = int(data.get("ticket_id"))
     close_after_comment = bool(data.get("close_after_comment", False))
+    entry_source = str(data.get("entry_source") or "legacy")
+    workspace_source = entry_source == "workspace" and pc_ticket_workspace_enabled()
     user_id = target.from_user.id
     bot = target.bot
     answer = target.message.answer if isinstance(target, CallbackQuery) else target.answer
@@ -214,7 +245,6 @@ async def _submit_comment_text(target, state: FSMContext, comment_text: str):
 
     await state.clear()
     updated_ticket = await get_ticket_by_id(ticket_id)
-    await answer(result_text)
 
     if user_id == created_by:
         await notify_department_about_ticket(
@@ -239,6 +269,16 @@ async def _submit_comment_text(target, state: FSMContext, comment_text: str):
                 text=notify_text,
                 reply_markup=delayed_close_markup,
             )
+
+    if workspace_source:
+        # Технический текст пользователя нужен только как ввод. После успешного
+        # сохранения убираем его и возвращаем primary UI к актуальной карточке.
+        if isinstance(target, Message):
+            await delete_trigger_message(target)
+        await show_workspace_ticket(target, ticket_id, answer_callback=False)
+    else:
+        await answer(result_text)
+
     if isinstance(target, CallbackQuery):
         await target.answer()
 
@@ -264,6 +304,7 @@ async def ticket_resolve_callback(call: CallbackQuery):
 
     user, admin_flag = await get_current_user_and_admin(call.from_user.id)
     ticket = await get_ticket_by_id(ticket_id)
+    workspace_source = await _is_workspace_call(call)
 
     if not can_user_resolve_ticket(ticket, user):
         await call.answer("Ты не можешь выполнить этот тикет.", show_alert=True)
@@ -282,8 +323,6 @@ async def ticket_resolve_callback(call: CallbackQuery):
             return
 
         updated_ticket = await get_ticket_by_id(ticket_id)
-
-        await call.message.edit_reply_markup(reply_markup=ticket_action_keyboard(updated_ticket, user, admin_flag))
 
         await send_completed_ticket_card_to_creator(
             bot=call.bot,
@@ -308,8 +347,6 @@ async def ticket_resolve_callback(call: CallbackQuery):
 
         updated_ticket = await get_ticket_by_id(ticket_id)
 
-        await call.message.edit_reply_markup(reply_markup=ticket_action_keyboard(updated_ticket, user, admin_flag))
-
         await send_completed_ticket_card_to_creator(
             bot=call.bot,
             ticket=updated_ticket,
@@ -320,6 +357,12 @@ async def ticket_resolve_callback(call: CallbackQuery):
             ),
         )
 
+    if workspace_source:
+        await show_workspace_ticket(call, ticket_id, answer_callback=False)
+    else:
+        await call.message.edit_reply_markup(
+            reply_markup=ticket_action_keyboard(updated_ticket, user, admin_flag)
+        )
     await call.answer()
 
 @router.callback_query(F.data.startswith("ticket_continue_auto_close:"))
@@ -328,6 +371,7 @@ async def ticket_continue_auto_close_callback(call: CallbackQuery):
 
     user, admin_flag = await get_current_user_and_admin(call.from_user.id)
     ticket = await get_ticket_by_id(ticket_id)
+    workspace_source = await _is_workspace_call(call)
 
     if not can_creator_control_ticket(ticket, user):
         await call.answer("Только автор тикета может продолжить обсуждение.", show_alert=True)
@@ -351,9 +395,12 @@ async def ticket_continue_auto_close_callback(call: CallbackQuery):
         return
 
     updated_ticket = await get_ticket_by_id(ticket_id)
-    await call.message.edit_reply_markup(
-        reply_markup=ticket_action_keyboard(updated_ticket, user, admin_flag)
-    )
+    if workspace_source:
+        await show_workspace_ticket(call, ticket_id, answer_callback=False)
+    else:
+        await call.message.edit_reply_markup(
+            reply_markup=ticket_action_keyboard(updated_ticket, user, admin_flag)
+        )
 
     await notify_department_about_ticket(
         bot=call.bot,
@@ -372,6 +419,7 @@ async def ticket_close_now_callback(call: CallbackQuery):
 
     user, admin_flag = await get_current_user_and_admin(call.from_user.id)
     ticket = await get_ticket_by_id(ticket_id)
+    workspace_source = await _is_workspace_call(call)
 
     if not can_creator_control_ticket(ticket, user):
         await call.answer("Только автор тикета может закрыть его сейчас.", show_alert=True)
@@ -397,9 +445,12 @@ async def ticket_close_now_callback(call: CallbackQuery):
         return
 
     updated_ticket = await get_ticket_by_id(ticket_id)
-    await call.message.edit_reply_markup(
-        reply_markup=ticket_action_keyboard(updated_ticket, user, admin_flag)
-    )
+    if workspace_source:
+        await show_workspace_ticket(call, ticket_id, answer_callback=False)
+    else:
+        await call.message.edit_reply_markup(
+            reply_markup=ticket_action_keyboard(updated_ticket, user, admin_flag)
+        )
 
     await notify_department_about_ticket(
         bot=call.bot,
@@ -418,6 +469,7 @@ async def ticket_confirm_close_callback(call: CallbackQuery):
 
     user, admin_flag = await get_current_user_and_admin(call.from_user.id)
     ticket = await get_ticket_by_id(ticket_id)
+    workspace_source = await _is_workspace_call(call)
 
     if not can_creator_control_ticket(ticket, user):
         await call.answer("Только автор тикета может подтвердить выполнение.", show_alert=True)
@@ -441,7 +493,10 @@ async def ticket_confirm_close_callback(call: CallbackQuery):
 
     updated_ticket = await get_ticket_by_id(ticket_id)
 
-    await call.message.edit_reply_markup(reply_markup=ticket_action_keyboard(updated_ticket, user, admin_flag))
+    if workspace_source:
+        await show_workspace_ticket(call, ticket_id, answer_callback=False)
+    else:
+        await call.message.edit_reply_markup(reply_markup=ticket_action_keyboard(updated_ticket, user, admin_flag))
 
     await notify_department_about_ticket(
         bot=call.bot,
@@ -460,6 +515,7 @@ async def ticket_return_callback(call: CallbackQuery, state: FSMContext):
 
     user, admin_flag = await get_current_user_and_admin(call.from_user.id)
     ticket = await get_ticket_by_id(ticket_id)
+    workspace_source = await _is_workspace_call(call)
 
     if not can_user_return_ticket(ticket, user, admin_flag):
         await call.answer("Ты не можешь вернуть этот тикет в работу.", show_alert=True)
@@ -480,7 +536,10 @@ async def ticket_return_callback(call: CallbackQuery, state: FSMContext):
 
     updated_ticket = await get_ticket_by_id(ticket_id)
 
-    await call.message.edit_reply_markup(reply_markup=ticket_action_keyboard(updated_ticket, user, admin_flag))
+    if workspace_source:
+        await show_workspace_ticket(call, ticket_id, answer_callback=False)
+    else:
+        await call.message.edit_reply_markup(reply_markup=ticket_action_keyboard(updated_ticket, user, admin_flag))
 
     await notify_department_about_ticket(
         bot=call.bot,
@@ -504,6 +563,7 @@ async def ticket_cancel_callback(call: CallbackQuery, state: FSMContext):
 
     user, admin_flag = await get_current_user_and_admin(call.from_user.id)
     ticket = await get_ticket_by_id(ticket_id)
+    workspace_source = await _is_workspace_call(call)
 
     if not can_participant_cancel_ticket(ticket, user, admin_flag):
         await call.answer("Закрыть тикет как неактуальный может его автор или администратор.", show_alert=True)
@@ -511,12 +571,13 @@ async def ticket_cancel_callback(call: CallbackQuery, state: FSMContext):
 
     await state.clear()
     await state.set_state(TicketActionStates.waiting_cancel_reason)
-    await state.update_data(ticket_id=ticket_id)
+    await state.update_data(ticket_id=ticket_id, entry_source="workspace" if workspace_source else "legacy")
 
-    await call.message.answer(
-        f"Напиши причину закрытия/отмены тикета #{ticket_id}."
-    )
-
+    prompt = f"❌ <b>Закрытие тикета #{ticket_id}</b>\n\nНапиши причину закрытия/отмены одним сообщением."
+    if workspace_source:
+        await send_ui_text(call.bot, chat_id=call.from_user.id, text=prompt)
+    else:
+        await call.message.answer(prompt)
     await call.answer()
 
 @router.message(TicketActionStates.waiting_cancel_reason)
@@ -527,6 +588,7 @@ async def process_cancel_reason(message: Message, state: FSMContext):
 
     data = await state.get_data()
     ticket_id = int(data.get("ticket_id"))
+    workspace_source = str(data.get("entry_source") or "legacy") == "workspace" and pc_ticket_workspace_enabled()
 
     user, admin_flag = await get_current_user_and_admin(message.from_user.id)
     ticket = await get_ticket_by_id(ticket_id)
@@ -553,8 +615,6 @@ async def process_cancel_reason(message: Message, state: FSMContext):
 
     updated_ticket = await get_ticket_by_id(ticket_id)
 
-    await message.answer(f"✅ Тикет #{ticket_id} закрыт.")
-
     actor_department = department_by_role(row_get(user, "role"))
     target_department = (
         row_get(updated_ticket, "requester_department")
@@ -569,3 +629,8 @@ async def process_cancel_reason(message: Message, state: FSMContext):
         ticket_id=ticket_id,
         use_ticket_actions=False,
     )
+    if workspace_source:
+        await delete_trigger_message(message)
+        await show_workspace_ticket(message, ticket_id, answer_callback=False)
+    else:
+        await message.answer(f"✅ Тикет #{ticket_id} закрыт.")

@@ -337,6 +337,23 @@ async def init_db():
     """)
 
     await db.execute("""
+        CREATE TABLE IF NOT EXISTS ui_navigation_state (
+            user_id INTEGER PRIMARY KEY,
+            view TEXT NOT NULL DEFAULT 'main',
+            list_type TEXT,
+            page INTEGER NOT NULL DEFAULT 0,
+            filters_json TEXT NOT NULL DEFAULT '{}',
+            search_query TEXT,
+            queue_ids_json TEXT NOT NULL DEFAULT '[]',
+            current_ticket_id INTEGER,
+            current_index INTEGER,
+            mode TEXT NOT NULL DEFAULT 'normal',
+            return_view TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    await db.execute("""
         CREATE TABLE IF NOT EXISTS daily_stats (
             stat_date TEXT PRIMARY KEY,
             total_open INTEGER NOT NULL DEFAULT 0,
@@ -417,6 +434,7 @@ async def init_db():
     await db.execute("CREATE INDEX IF NOT EXISTS idx_ui_button_events_department_created ON ui_button_events(department, created_at)")
     await db.execute("CREATE INDEX IF NOT EXISTS idx_ticket_message_registry_user ON ticket_message_registry(user_id, updated_at)")
     await db.execute("CREATE INDEX IF NOT EXISTS idx_ui_message_registry_updated ON ui_message_registry(updated_at)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_ui_navigation_state_updated ON ui_navigation_state(updated_at)")
 
     await db.execute("""
         INSERT OR IGNORE INTO settings (key, value)
