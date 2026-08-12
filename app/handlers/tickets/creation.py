@@ -14,6 +14,7 @@ from app.keyboards.tickets import (
     post_create_options_keyboard,
     ticket_category_keyboard,
 )
+from app.services.main_menu_dashboard import build_main_menu_text
 from app.services.attachments import create_attachment
 from app.services.order_status import build_purchasing_snapshot, get_order_status
 from app.services.ticket_messages import replace_ticket_message_bundle
@@ -347,10 +348,11 @@ async def cancel_create_ticket_callback(call: CallbackQuery, state: FSMContext):
         await call.answer("Создание тикета отменено.", show_alert=False)
         return
 
+    menu_text = await build_main_menu_text(call.from_user.id, row_get(user, "role"))
     await send_ui_text(
         call.bot,
         chat_id=call.from_user.id,
-        text="🏠 <b>Главное меню</b>\n\nВыбери действие:",
+        text=menu_text,
         reply_markup=main_menu_for_role(row_get(user, "role"), is_admin=admin_flag),
     )
     await call.answer("Создание тикета отменено.")

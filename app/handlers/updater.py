@@ -19,6 +19,7 @@ from app.keyboards.admin import (
     admin_updates_menu_keyboard,
     update_confirm_keyboard,
 )
+from app.services.main_menu_dashboard import build_main_menu_text
 from app.services.update_manager import (
     INCOMING_DIR,
     ensure_update_directories,
@@ -292,10 +293,11 @@ async def admin_ui_confirm_callback(call: CallbackQuery, bot: Bot):
                     is_admin=telegram_id == int(settings.admin_id),
                 ),
             )
+            menu_text = await build_main_menu_text(telegram_id, user["role"])
             await send_ui_text(
                 bot,
                 chat_id=telegram_id,
-                text="🏠 <b>Главное меню</b>\n\nВыбери действие:",
+                text=menu_text,
                 reply_markup=main_menu_for_role(
                     user["role"],
                     is_admin=telegram_id == int(settings.admin_id),

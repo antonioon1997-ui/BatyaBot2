@@ -32,6 +32,7 @@ from app.keyboards.admin import (
     admin_note_card_keyboard,
 )
 from app.keyboards.common import main_menu_for_role
+from app.services.main_menu_dashboard import build_main_menu_text
 from app.services.admin_notes import list_notes, get_note, create_note, update_note, delete_note
 from app.services.ui_messages import send_ui_text
 from app.services.ui_versions import pc_ticket_workspace_enabled
@@ -1281,10 +1282,11 @@ async def callback_main_menu(callback: CallbackQuery):
     user = await get_user_by_telegram_id(callback.from_user.id)
     is_admin = is_admin_user(callback.from_user.id)
 
+    menu_text = await build_main_menu_text(callback.from_user.id, user["role"] if user else None)
     await send_ui_text(
         callback.bot,
         chat_id=callback.from_user.id,
-        text="🏠 <b>Главное меню</b>\n\nВыбери действие:",
+        text=menu_text,
         reply_markup=main_menu_for_role(user["role"], is_admin=is_admin) if user else None,
     )
 
