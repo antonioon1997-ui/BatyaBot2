@@ -7,13 +7,20 @@ from aiogram.types import CallbackQuery, Message
 
 from app.keyboards.tickets import (
     ticket_workspace_keyboard,
-    workspace_history_keyboard,
     workspace_ticket_action_keyboard,
     workspace_ticket_more_keyboard,
 )
 from app.services.attachments import get_ticket_attachments
 from app.services.order_status import OrderStatusUnavailable, get_order_status
 from app.services.ticket_messages import delete_message_ids
+from app.services.ticket_media_ui import show_ticket_media_header, WORKSPACE_MEDIA_SLOT
+from app.services.ticket_activity import acknowledge_ticket_activity, show_ticket_activity_panel
+from app.services.ticket_history_ui import (
+    compose_inline_ticket_history,
+    get_ticket_history_blocks,
+    hide_full_ticket_history,
+    show_full_ticket_history,
+)
 from app.services.tickets import (
     get_archive_incoming_tickets,
     get_archive_outgoing_tickets,
@@ -22,12 +29,11 @@ from app.services.tickets import (
     get_outgoing_tickets,
     get_ticket_by_id,
     get_ticket_comments,
-    get_ticket_events,
     get_work_tickets,
     update_ticket_status,
 )
 from app.services.ui_context import get_ui_context, set_ticket_context, set_ticket_list_context, set_ui_context
-from app.services.ui_messages import clear_ui_message_bundle, replace_ui_message_bundle, send_ui_text
+from app.services.ui_messages import clear_ui_message_bundle, replace_ui_message_bundle, send_ui_text, send_ui_text_fresh
 from app.services.work_management import (
     get_assigned_tickets,
     get_common_tickets,
@@ -45,10 +51,10 @@ from .utils import (
     get_status_name,
     has_text_value,
     is_client_to_purchasing_ticket,
+    notify_opposite_department_about_ticket,
     row_get,
     short_text,
 )
-from .views import send_completed_ticket_card_to_creator
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -95,13 +101,19 @@ def _filter_label(filters: dict) -> str | None:
 
 
 async def _load_tickets(user_id: int, user, is_admin: bool, list_type: str, filters: dict | None = None):
-    department = None if is_admin else department_by_role(row_get(user, "role"))
+    # Админские права не должны стирать рабочий контекст отдела.
+    # Пользователь может одновременно быть администратором и закупщиком: в этом случае
+    # «Входящие» должны означать тикеты, адресованные закупке, а не вообще все открытые
+    # тикеты системы. Полный межотдельный просмотр остаётся в отдельной админке.
+    role_department = department_by_role(row_get(user, "role"))
+    department = None if is_admin else role_department
     filters = dict(filters or {})
     if filters:
+        filter_department = role_department if list_type == "incoming" and role_department else department
         return list(
             await get_filtered_tickets(
                 user_id,
-                department,
+                filter_department,
                 list_type,
                 limit=250,
                 **filters,
@@ -109,7 +121,8 @@ async def _load_tickets(user_id: int, user, is_admin: bool, list_type: str, filt
         )
 
     if list_type == "incoming":
-        return list(await get_incoming_tickets(department=department, limit=None))
+        incoming_department = role_department or department
+        return list(await get_incoming_tickets(department=incoming_department, limit=None))
     if list_type == "outgoing":
         return list(await get_outgoing_tickets(user_id, limit=250))
     if list_type == "work":
@@ -201,6 +214,7 @@ async def show_ticket_workspace(
         mode=selected_mode,
     )
     await clear_ui_message_bundle(target.bot, chat_id=target.from_user.id, slot=ATTACHMENTS_SLOT)
+    await clear_ui_message_bundle(target.bot, chat_id=target.from_user.id, slot=WORKSPACE_MEDIA_SLOT)
     await send_ui_text(
         target.bot,
         chat_id=target.from_user.id,
@@ -262,7 +276,15 @@ async def _current_order_block(ticket, user, is_admin: bool) -> str | None:
     return "\n".join(lines)
 
 
-async def build_workspace_ticket_text(ticket, user, is_admin: bool, *, position: int | None, total: int | None, mode: str) -> str:
+async def build_workspace_ticket_view(
+    ticket,
+    user,
+    is_admin: bool,
+    *,
+    position: int | None,
+    total: int | None,
+    mode: str,
+) -> tuple[str, bool]:
     prefix = "🚀 Разбор · " if mode == "review" else ""
     pos = f" · {position + 1} из {total}" if position is not None and total else ""
     lines = [f"{prefix}🎫 <b>Тикет #{ticket['id']}</b>{pos}", ""]
@@ -276,27 +298,30 @@ async def build_workspace_ticket_text(ticket, user, is_admin: bool, *, position:
     lines.append(f"🕒 Создан: {format_moscow_datetime(row_get(ticket, 'created_at'))}")
     lines.extend(["", "📝 <b>Описание</b>", short_text(row_get(ticket, "description"), 850)])
 
-    comments = await get_ticket_comments(int(ticket["id"]), limit=None)
-    if comments:
-        latest = comments[-1]
-        author = row_get(latest, "author_name") or row_get(latest, "author_username") or row_get(latest, "author_telegram_id")
-        lines.extend([
-            "",
-            "💬 <b>Последний комментарий</b>",
-            f"{html_escape(author)}: {short_text(row_get(latest, 'text'), 350)}",
-        ])
+    # В рабочей карточке показываем единую хронологию: все комментарии/ответы
+    # и все изменения тикета. Если она не помещается в одно Telegram-сообщение,
+    # оставляем свежую часть и предлагаем внешний полный просмотр.
+    history_blocks = await get_ticket_history_blocks(int(ticket["id"]))
 
+    suffix: list[str] = []
     order_block = await _current_order_block(ticket, user, is_admin)
     if order_block:
-        lines.extend(["", order_block])
+        suffix.append(order_block)
     if has_text_value(row_get(ticket, "current_summary")):
-        lines.extend(["", "📍 <b>Текущий итог:</b>", short_text(row_get(ticket, "current_summary"), 450)])
+        suffix.extend(["📍 <b>Текущий итог:</b>", short_text(row_get(ticket, "current_summary"), 450)])
     if has_text_value(row_get(ticket, "next_action")):
-        lines.extend(["", "➡️ <b>Следующее действие:</b>", short_text(row_get(ticket, "next_action"), 450)])
-    attachments = await get_ticket_attachments(int(ticket["id"]))
-    if attachments:
-        lines.extend(["", f"📎 Вложения: {len(attachments)}"])
-    return "\n".join(lines)
+        suffix.extend(["➡️ <b>Следующее действие:</b>", short_text(row_get(ticket, "next_action"), 450)])
+    # Фактические вложения рисуются отдельным header-bundle над карточкой,
+    # поэтому текстовая строка «Вложения: N» здесь больше не нужна.
+    return compose_inline_ticket_history(lines, history_blocks, suffix)
+
+
+async def build_workspace_ticket_text(ticket, user, is_admin: bool, *, position: int | None, total: int | None, mode: str) -> str:
+    # Совместимый wrapper для существующих тестов/внешних вызовов.
+    text, _ = await build_workspace_ticket_view(
+        ticket, user, is_admin, position=position, total=total, mode=mode
+    )
+    return text
 
 
 async def show_workspace_ticket(
@@ -333,20 +358,37 @@ async def show_workspace_ticket(
     except Exception:
         logger.debug("Не удалось отметить тикет %s прочитанным", ticket_id, exc_info=True)
 
-    text = await build_workspace_ticket_text(ticket, user, is_admin, position=position, total=len(queue), mode=mode)
-    await send_ui_text(
+    text, history_truncated = await build_workspace_ticket_view(
+        ticket, user, is_admin, position=position, total=len(queue), mode=mode
+    )
+    keyboard = workspace_ticket_action_keyboard(
+        ticket,
+        user,
+        is_admin,
+        position=position,
+        total=len(queue),
+        review_mode=(mode == "review"),
+        back_callback=_back_callback_for_context(context),
+        show_full_history=history_truncated,
+    )
+
+    # Все накопленные вложения тикета (из создания, «Ответить» и «Дополнить»)
+    # являются единым визуальным header. Media отправляется первым, а PRIMARY
+    # пересоздаётся следом, поэтому в ленте всегда: вложения -> inline-карточка.
+    attachments = await get_ticket_attachments(int(ticket_id))
+    media_ids = await show_ticket_media_header(
+        target.bot,
+        chat_id=target.from_user.id,
+        ticket_id=int(ticket_id),
+        attachments=attachments,
+        slot=WORKSPACE_MEDIA_SLOT,
+    )
+    sender = send_ui_text_fresh if media_ids else send_ui_text
+    await sender(
         target.bot,
         chat_id=target.from_user.id,
         text=text,
-        reply_markup=workspace_ticket_action_keyboard(
-            ticket,
-            user,
-            is_admin,
-            position=position,
-            total=len(queue),
-            review_mode=(mode == "review"),
-            back_callback=_back_callback_for_context(context),
-        ),
+        reply_markup=keyboard,
     )
     if answer_callback and isinstance(target, CallbackQuery):
         await target.answer()
@@ -427,7 +469,7 @@ async def callback_workspace_more(call: CallbackQuery):
         await call.answer("Нет доступа.", show_alert=True)
         return
     context = await get_ui_context(call.from_user.id)
-    text = await build_workspace_ticket_text(
+    text, _history_truncated = await build_workspace_ticket_view(
         ticket,
         user,
         is_admin,
@@ -446,37 +488,29 @@ async def callback_workspace_more(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("workspace_history:"))
 async def callback_workspace_history(call: CallbackQuery):
+    """Открывает полную историю отдельным временным сообщением.
+
+    PRIMARY UI и Центр уведомлений не меняются. Кнопка скрытия удаляет только
+    визуальную копию истории и не изменяет ни тикет, ни его события в БД.
+    """
     ticket_id = int(call.data.split(":", 1)[1])
     user, is_admin = await get_current_user_and_admin(call.from_user.id)
     ticket = await get_ticket_by_id(ticket_id)
     if not ticket or not can_user_view_ticket(ticket, user, is_admin):
         await call.answer("Нет доступа.", show_alert=True)
         return
-    comments = await get_ticket_comments(ticket_id, limit=None)
-    events = await get_ticket_events(ticket_id, limit=100)
-    lines = [f"📜 <b>Полная история тикета #{ticket_id}</b>", "", "📝 Описание:", html_escape(row_get(ticket, "description"))]
-    if comments:
-        lines.extend(["", "💬 <b>Комментарии</b>"])
-        for comment in comments:
-            author = row_get(comment, "author_name") or row_get(comment, "author_username") or row_get(comment, "author_telegram_id")
-            lines.append(f"— {html_escape(author)} [{format_moscow_datetime(row_get(comment, 'created_at'))}]:\n{html_escape(row_get(comment, 'text'))}")
-    if events:
-        lines.extend(["", "🕓 <b>История действий</b>"])
-        for event in events:
-            actor = row_get(event, "actor_name") or row_get(event, "actor_username") or row_get(event, "actor_telegram_id") or "Система"
-            details = f" — {html_escape(row_get(event, 'details'))}" if has_text_value(row_get(event, "details")) else ""
-            lines.append(f"— {format_moscow_datetime(row_get(event, 'created_at'))}: {html_escape(row_get(event, 'event_type'))} ({html_escape(actor)}){details}")
-    context = await get_ui_context(call.from_user.id)
-    await send_ui_text(
-        call.bot,
-        chat_id=call.from_user.id,
-        text="\n\n".join(lines),
-        reply_markup=workspace_history_keyboard(
-            ticket_id,
-            back_callback=_back_callback_for_context(context),
-        ),
-    )
-    await call.answer()
+    await show_full_ticket_history(call.bot, chat_id=call.from_user.id, ticket_id=ticket_id)
+    await call.answer("Полная история открыта ниже.")
+
+
+@router.callback_query(F.data == "ticket_full_history_hide")
+async def callback_hide_full_ticket_history(call: CallbackQuery):
+    await hide_full_ticket_history(call.bot, chat_id=call.from_user.id)
+    # Callback может относиться к сообщению, которое только что удалено.
+    try:
+        await call.answer()
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data.startswith("workspace_attachments:"))
@@ -562,7 +596,27 @@ async def callback_workspace_review_resolve(call: CallbackQuery):
         await call.answer("Состояние тикета уже изменилось.", show_alert=True)
         return
     updated = await get_ticket_by_id(ticket_id)
-    await send_completed_ticket_card_to_creator(call.bot, updated, headline="")
+    await notify_opposite_department_about_ticket(
+        bot=call.bot,
+        ticket=updated,
+        actor_department=department_by_role(row_get(user, "role")),
+        text=(
+            f"✅ Тикет #{ticket_id}: выполнен и закрыт"
+            if target_status == "done"
+            else f"✅ Тикет #{ticket_id}: помечен выполненным"
+        ),
+        notification_type="ticket_completed",
+        exclude_telegram_id=call.from_user.id,
+    )
+    # Обработка через PRIMARY review-mode тоже снимает этот тикет из второй
+    # панели: пользователь уже совершил рабочее действие и отдельный «Новый»
+    # больше не нужен.
+    try:
+        await acknowledge_ticket_activity(call.from_user.id, ticket_id)
+        await mark_ticket_read(ticket_id, call.from_user.id)
+        await show_ticket_activity_panel(call.bot, recipient_id=call.from_user.id, fresh=False)
+    except Exception:
+        logger.exception("Не удалось синхронизировать Центр уведомлений после review resolve")
     context = await get_ui_context(call.from_user.id)
     queue = context.queue
     current = context.current_index if context.current_index is not None else 0
